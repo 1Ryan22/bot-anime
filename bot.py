@@ -3,9 +3,26 @@ import time
 import json
 import os
 from datetime import datetime
+from flask import Flask
+from threading import Thread
 
-WEBHOOK_URL = "https://discord.com/api/webhooks/1488317504471306280/6DPa-uWVxAwLutFU7r9QjkRVEl9DwINhCv4dgIXp-8oVBlLPaA_Zr5UVMkwAlwtcMq_j"
+WEBHOOK_URL = "https://discord.com/api/webhooks/1488317504471306280/6DPa-uWVxAwLutFU7r9QjkRVEl9DwINhCv4dgIXp-8oVBlLPaA_Zr5UVMkwAlwtcMq_jgit add ."
 STATE_FILE = "enviados.json"
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot online!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.daemon = True
+    t.start()
 
 def temporada_atual():
     mes = datetime.now().month
@@ -30,9 +47,9 @@ def salvar_enviados(lista):
         json.dump(lista, f)
 
 def enviar_discord(anime):
-    titulo = anime["title"]
-    url = anime["url"]
-    imagem = anime["images"]["jpg"]["image_url"]
+    titulo = anime.get("title", "Sem título")
+    url = anime.get("url", "")
+    imagem = anime.get("images", {}).get("jpg", {}).get("image_url", "")
     score = anime.get("score", "N/A")
     eps = anime.get("episodes", "?")
     synopsis = anime.get("synopsis", "Sem sinopse disponível.")
@@ -44,15 +61,17 @@ def enviar_discord(anime):
         "title": titulo,
         "url": url,
         "description": f"⭐ Nota: {score}\n🎬 Episódios: {eps}\n\n📖 {synopsis}",
-        "image": {"url": imagem},
         "color": 16753920
     }
+
+    if imagem:
+        embed["image"] = {"url": imagem}
 
     payload = {
         "embeds": [embed]
     }
 
-    response = requests.post(WEBHOOK_URL, json=payload)
+    response = requests.post(WEBHOOK_URL, json=payload, timeout=15)
 
     if response.status_code in [200, 204]:
         print(f"Enviado: {titulo}")
@@ -60,6 +79,7 @@ def enviar_discord(anime):
         print("Erro ao enviar pro Discord:", response.status_code, response.text)
 
 def main():
+    keep_alive()
     enviados = carregar_enviados()
 
     while True:
@@ -71,12 +91,13 @@ def main():
 
         try:
             r = requests.get(url, timeout=15)
+            r.raise_for_status()
             data = r.json().get("data", [])
 
             for anime in data:
-                anime_id = anime["mal_id"]
+                anime_id = anime.get("mal_id")
 
-                if anime_id not in enviados:
+                if anime_id and anime_id not in enviados:
                     enviar_discord(anime)
                     enviados.append(anime_id)
                     salvar_enviados(enviados)
@@ -85,7 +106,7 @@ def main():
         except Exception as e:
             print("Erro:", e)
 
-        print("Esperando 1 hora para verificar de novo...\n")
+        print("Esperando 10 minutos para verificar de novo...\n")
         time.sleep(600)
 
 if __name__ == "__main__":
