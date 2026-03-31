@@ -6,7 +6,7 @@ from datetime import datetime
 from flask import Flask
 from threading import Thread
 
-WEBHOOK_URL = "https://discord.com/api/webhooks/1488317504471306280/6DPa-uWVxAwLutFU7r9QjkRVEl9DwINhCv4dgIXp-8oVBlLPaA_Zr5UVMkwAlwtcMq_jgit add ."
+WEBHOOK_URL = "https://discord.com/api/webhooks/1488335755645292637/yq9uG31XGY5_5C2loWv-Yg06HRLCL8JfPyA7zEnj9H-qJ9wNfTZZotOp4woLhRjNq651"
 STATE_FILE = "enviados.json"
 
 app = Flask(__name__)
