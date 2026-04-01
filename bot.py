@@ -1,3 +1,4 @@
+
 import os
 import json
 import requests
@@ -14,6 +15,7 @@ from discord.ext import tasks
 # =========================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 ANILIST_URL = "https://graphql.anilist.co"
+JIKAN_URL = "https://api.jikan.moe/v4/anime"
 COR_EMBED = 0xFF8C00
 ARQUIVO_AUTO = "auto_notificacao.json"
 
@@ -162,22 +164,62 @@ def mesmo_dia_local(ts):
     hoje = agora_local().date()
     return dt == hoje
 
-def criar_embed_anime(media, titulo_extra=None):
-    titulo = (
+def melhor_titulo(media):
+    return (
         media.get("title", {}).get("romaji")
         or media.get("title", {}).get("english")
         or media.get("title", {}).get("native")
         or "Sem título"
     )
 
-    url = media.get("siteUrl", "")
-    imagem = (
+def imagem_anilist(media):
+    return (
         media.get("coverImage", {}).get("extraLarge")
         or media.get("coverImage", {}).get("large")
         or media.get("coverImage", {}).get("medium")
         or ""
     )
 
+def buscar_imagem_jikan(titulo):
+    try:
+        params = {"q": titulo, "limit": 3}
+        resposta = requests.get(JIKAN_URL, params=params, timeout=20)
+        resposta.raise_for_status()
+        dados = resposta.json().get("data", [])
+
+        if not dados:
+            return ""
+
+        # Prioriza TV quando possível
+        for item in dados:
+            if item.get("type") == "TV":
+                return (
+                    item.get("images", {}).get("jpg", {}).get("large_image_url")
+                    or item.get("images", {}).get("jpg", {}).get("image_url")
+                    or ""
+                )
+
+        # fallback no primeiro resultado
+        primeiro = dados[0]
+        return (
+            primeiro.get("images", {}).get("jpg", {}).get("large_image_url")
+            or primeiro.get("images", {}).get("jpg", {}).get("image_url")
+            or ""
+        )
+    except Exception:
+        return ""
+
+def pegar_imagem_correta(media):
+    titulo = melhor_titulo(media)
+    img_jikan = buscar_imagem_jikan(titulo)
+    if img_jikan:
+        return img_jikan
+    return imagem_anilist(media)
+
+def criar_embed_anime(media, titulo_extra=None):
+    titulo = melhor_titulo(media)
+    url = media.get("siteUrl", "")
+    imagem = pegar_imagem_correta(media)
     nota = media.get("averageScore")
     episodios = media.get("episodes")
     sinopse = media.get("description") or "Sem sinopse disponível."
@@ -208,14 +250,20 @@ def criar_embed_anime(media, titulo_extra=None):
 
     return embed
 
+# =========================
+# QUERIES ANILIST
+# =========================
 def query_temporada_atual():
     query = """
     query ($season: MediaSeason, $seasonYear: Int, $page: Int, $perPage: Int) {
       Page(page: $page, perPage: $perPage) {
         media(
           type: ANIME,
+          format: TV,
           season: $season,
           seasonYear: $seasonYear,
+          status_in: [RELEASING, NOT_YET_RELEASED],
+          isAdult: false,
           sort: POPULARITY_DESC
         ) {
           id
@@ -262,7 +310,9 @@ def query_novos_anunciados():
       Page(page: $page, perPage: $perPage) {
         media(
           type: ANIME,
+          format: TV,
           status: NOT_YET_RELEASED,
+          isAdult: false,
           sort: POPULARITY_DESC
         ) {
           id
@@ -304,9 +354,11 @@ def query_lancamentos_hoje():
       Page(page: $page, perPage: $perPage) {
         media(
           type: ANIME,
+          format: TV,
           season: $season,
           seasonYear: $seasonYear,
           status: RELEASING,
+          isAdult: false,
           sort: POPULARITY_DESC
         ) {
           id
@@ -358,9 +410,11 @@ def query_calendario_semanal():
       Page(page: $page, perPage: $perPage) {
         media(
           type: ANIME,
+          format: TV,
           season: $season,
           seasonYear: $seasonYear,
           status: RELEASING,
+          isAdult: false,
           sort: POPULARITY_DESC
         ) {
           id
@@ -497,12 +551,7 @@ async def semanal(interaction: discord.Interaction):
 
             dt = datetime.fromtimestamp(prox["airingAt"], tz=timezone.utc).astimezone()
             dia = nome_dia_pt(dt)
-            titulo = (
-                anime.get("title", {}).get("romaji")
-                or anime.get("title", {}).get("english")
-                or anime.get("title", {}).get("native")
-                or "Sem título"
-            )
+            titulo = melhor_titulo(anime)
 
             linha = f"**{titulo}** — Ep {prox.get('episode', '?')} às {dt.strftime('%H:%M')}"
             agenda.setdefault(dia, []).append(linha)
