@@ -1,3 +1,4 @@
+
 import os
 import json
 import requests
@@ -362,4 +363,173 @@ async def animetemp(interaction: discord.Interaction):
             await interaction.followup.send(embed=criar_embed_anime(anime, extra))
 
     except Exception as e:
-        await interaction.followup.send(f"Erro ao
+        await interaction.followup.send(f"Erro ao buscar temporada: `{e}`")
+
+@tree.command(name="novo", description="Mostra novos animes anunciados / próximos")
+async def novo(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    try:
+        animes = query_novos_anunciados()
+
+        if not animes:
+            await interaction.followup.send("Não encontrei novos animes anunciados.")
+            return
+
+        await interaction.followup.send("🆕 **Novos animes anunciados / próximos:**")
+
+        for anime in animes:
+            inicio = anime.get("startDate", {})
+            data_inicio = f"{inicio.get('day') or '??'}/{inicio.get('month') or '??'}/{inicio.get('year') or '????'}"
+            extra = f"🆕 Novo anime anunciado\n📅 Estreia prevista: {data_inicio}"
+            await interaction.followup.send(embed=criar_embed_anime(anime, extra))
+
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao buscar novos animes: `{e}`")
+
+@tree.command(name="lancamento", description="Mostra animes que lançam hoje")
+async def lancamento(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    try:
+        animes = query_lancamentos_hoje()
+
+        if not animes:
+            await interaction.followup.send("Hoje não encontrei lançamentos.")
+            return
+
+        await interaction.followup.send("📺 **Animes com lançamento hoje:**")
+
+        for anime in animes[:5]:
+            prox = anime.get("nextAiringEpisode", {})
+            extra = (
+                "📺 Lançamento de hoje\n"
+                f"🎞️ Episódio: {prox.get('episode', '?')}\n"
+                f"⏰ Horário: {formatar_timestamp_local(prox.get('airingAt'))}"
+            )
+            await interaction.followup.send(embed=criar_embed_anime(anime, extra))
+
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao buscar lançamentos: `{e}`")
+
+@tree.command(name="semanal", description="Mostra o calendário semanal da temporada atual")
+async def semanal(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    try:
+        animes = query_calendario_semanal()
+        agenda = {
+            "Segunda": [],
+            "Terça": [],
+            "Quarta": [],
+            "Quinta": [],
+            "Sexta": [],
+            "Sábado": [],
+            "Domingo": []
+        }
+
+        for anime in animes:
+            prox = anime.get("nextAiringEpisode")
+            if not prox:
+                continue
+
+            airing_at = prox.get("airingAt")
+            episodio = prox.get("episode")
+            if not airing_at:
+                continue
+
+            dt = datetime.fromtimestamp(airing_at, tz=timezone.utc).astimezone()
+            dia = nome_dia_pt(dt)
+            titulo = melhor_titulo(anime)
+            linha = f"**{titulo}** — Ep {episodio or '?'} às {dt.strftime('%H:%M')}"
+
+            if dia in agenda:
+                agenda[dia].append((dt, linha))
+
+        for dia in agenda:
+            agenda[dia].sort(key=lambda x: x[0])
+
+        embed = discord.Embed(
+            title=f"📅 Calendário semanal — {nome_temporada_pt(temporada_atual())} {agora_local().year}",
+            color=COR_EMBED
+        )
+
+        for dia in ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]:
+            itens = agenda[dia]
+            texto = "\n".join([item[1] for item in itens[:8]]) if itens else "Nenhum anime encontrado."
+            embed.add_field(name=dia, value=texto[:1024], inline=False)
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao montar calendário semanal: `{e}`")
+
+@tree.command(name="autonotify", description="Liga ou desliga notificações automáticas neste canal")
+@app_commands.describe(acao="Escolha ligar ou desligar")
+@app_commands.choices(acao=[
+    app_commands.Choice(name="ligar", value="ligar"),
+    app_commands.Choice(name="desligar", value="desligar")
+])
+async def autonotify(interaction: discord.Interaction, acao: app_commands.Choice[str]):
+    dados = carregar_auto()
+    canal_id = interaction.channel_id
+
+    if acao.value == "ligar":
+        if canal_id not in dados["canais"]:
+            dados["canais"].append(canal_id)
+            salvar_auto(dados)
+        await interaction.response.send_message("✅ Notificação automática ligada neste canal.")
+    else:
+        if canal_id in dados["canais"]:
+            dados["canais"].remove(canal_id)
+            salvar_auto(dados)
+        await interaction.response.send_message("🛑 Notificação automática desligada neste canal.")
+
+@tasks.loop(minutes=10)
+async def verificar_notificacoes():
+    await client.wait_until_ready()
+
+    try:
+        dados = carregar_auto()
+        if not dados["canais"]:
+            return
+
+        data_hoje = agora_local().strftime("%Y-%m-%d")
+        if data_hoje not in dados["avisados"]:
+            dados["avisados"][data_hoje] = []
+
+        animes = query_lancamentos_hoje()
+
+        for anime in animes:
+            anime_id = anime.get("id")
+            if not anime_id or anime_id in dados["avisados"][data_hoje]:
+                continue
+
+            prox = anime.get("nextAiringEpisode", {})
+            extra = (
+                "🔔 Lançamento de hoje\n"
+                f"🎞️ Episódio: {prox.get('episode', '?')}\n"
+                f"⏰ Horário: {formatar_timestamp_local(prox.get('airingAt'))}"
+            )
+            embed = criar_embed_anime(anime, extra)
+
+            for canal_id in dados["canais"]:
+                canal = client.get_channel(canal_id)
+                if canal:
+                    await canal.send(embed=embed)
+
+            dados["avisados"][data_hoje].append(anime_id)
+            salvar_auto(dados)
+
+    except Exception as e:
+        print("Erro na notificação automática:", e)
+
+if __name__ == "__main__":
+    print("Iniciando Flask...")
+    keep_alive()
+
+    if not DISCORD_TOKEN:
+        raise ValueError("DISCORD_TOKEN não foi definido nas variáveis de ambiente.")
+
+    print("Iniciando bot do Discord...")
+    client.run(DISCORD_TOKEN)
