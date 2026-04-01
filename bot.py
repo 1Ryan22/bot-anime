@@ -1,6 +1,7 @@
-
 import os
 import json
+import time
+import asyncio
 import requests
 from datetime import datetime, timezone
 from flask import Flask
@@ -10,11 +11,28 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
+# =========================
+# CONFIG
+# =========================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 ANILIST_URL = "https://graphql.anilist.co"
+JIKAN_URL = "https://api.jikan.moe/v4/anime"
 COR_EMBED = 0xFF8C00
 ARQUIVO_AUTO = "auto_notificacao.json"
 
+MAX_RESULTADOS = 5
+COOLDOWN_SEGUNDOS = 5
+CACHE_SEGUNDOS = 120
+
+# =========================
+# CONTROLE
+# =========================
+cooldowns = {}
+cache_memoria = {}
+
+# =========================
+# FLASK PRA RENDER / UPTIMEROBOT
+# =========================
 app = Flask(__name__)
 
 @app.route("/")
@@ -30,10 +48,16 @@ def keep_alive():
     t.daemon = True
     t.start()
 
+# =========================
+# DISCORD
+# =========================
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
+# =========================
+# FUNÇÕES AUXILIARES
+# =========================
 def agora_local():
     return datetime.now().astimezone()
 
@@ -82,6 +106,14 @@ def traduzir_texto(texto):
     if not texto:
         return "Sem sinopse disponível."
 
+    cache_key = f"trad:{texto[:200]}"
+    agora = time.time()
+
+    if cache_key in cache_memoria:
+        salvo_em, valor = cache_memoria[cache_key]
+        if agora - salvo_em < 3600:
+            return valor
+
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {
@@ -100,7 +132,9 @@ def traduzir_texto(texto):
             if parte[0]:
                 traducao += parte[0]
 
-        return traducao.strip() if traducao.strip() else texto
+        traducao = traducao.strip() if traducao.strip() else texto
+        cache_memoria[cache_key] = (agora, traducao)
+        return traducao
     except Exception:
         return texto
 
@@ -159,16 +193,65 @@ def melhor_titulo(media):
         or "Sem título"
     )
 
-def criar_embed_anime(media, titulo_extra=None):
-    titulo = melhor_titulo(media)
-    url = media.get("siteUrl", "")
-    imagem = (
+def imagem_anilist(media):
+    return (
         media.get("coverImage", {}).get("extraLarge")
         or media.get("coverImage", {}).get("large")
         or media.get("coverImage", {}).get("medium")
         or ""
     )
 
+def buscar_imagem_jikan(titulo):
+    cache_key = f"imgj:{titulo.lower()}"
+    agora = time.time()
+
+    if cache_key in cache_memoria:
+        salvo_em, valor = cache_memoria[cache_key]
+        if agora - salvo_em < 3600:
+            return valor
+
+    try:
+        params = {"q": titulo, "limit": 3}
+        resposta = requests.get(JIKAN_URL, params=params, timeout=20)
+        resposta.raise_for_status()
+        dados = resposta.json().get("data", [])
+
+        if not dados:
+            cache_memoria[cache_key] = (agora, "")
+            return ""
+
+        for item in dados:
+            if item.get("type") == "TV":
+                imagem = (
+                    item.get("images", {}).get("jpg", {}).get("large_image_url")
+                    or item.get("images", {}).get("jpg", {}).get("image_url")
+                    or ""
+                )
+                cache_memoria[cache_key] = (agora, imagem)
+                return imagem
+
+        primeiro = dados[0]
+        imagem = (
+            primeiro.get("images", {}).get("jpg", {}).get("large_image_url")
+            or primeiro.get("images", {}).get("jpg", {}).get("image_url")
+            or ""
+        )
+        cache_memoria[cache_key] = (agora, imagem)
+        return imagem
+    except Exception:
+        return ""
+
+def pegar_imagem_correta(media):
+    titulo = melhor_titulo(media)
+    img_jikan = buscar_imagem_jikan(titulo)
+    if img_jikan:
+        return img_jikan
+    return imagem_anilist(media)
+
+def criar_embed_anime(media, titulo_extra=None):
+    titulo = melhor_titulo(media)
+    url = media.get("siteUrl", "")
+    imagem = pegar_imagem_correta(media)
     nota = media.get("averageScore")
     episodios = media.get("episodes")
     sinopse = media.get("description") or "Sem sinopse disponível."
@@ -199,7 +282,37 @@ def criar_embed_anime(media, titulo_extra=None):
 
     return embed
 
+def cache_get(nome):
+    agora = time.time()
+    if nome in cache_memoria:
+        salvo_em, valor = cache_memoria[nome]
+        if agora - salvo_em < CACHE_SEGUNDOS:
+            return valor
+    return None
+
+def cache_set(nome, valor):
+    cache_memoria[nome] = (time.time(), valor)
+
+def em_cooldown(user_id, comando):
+    chave = f"{user_id}:{comando}"
+    agora = time.time()
+    ultimo = cooldowns.get(chave, 0)
+
+    if agora - ultimo < COOLDOWN_SEGUNDOS:
+        return round(COOLDOWN_SEGUNDOS - (agora - ultimo), 1)
+
+    cooldowns[chave] = agora
+    return 0
+
+# =========================
+# QUERIES ANILIST
+# =========================
 def query_temporada_atual():
+    cache_nome = f"temporada:{temporada_atual()}:{agora_local().year}"
+    cache = cache_get(cache_nome)
+    if cache is not None:
+        return cache
+
     query = """
     query ($season: MediaSeason, $seasonYear: Int, $page: Int, $perPage: Int) {
       Page(page: $page, perPage: $perPage) {
@@ -214,13 +327,30 @@ def query_temporada_atual():
         ) {
           id
           siteUrl
-          title { romaji english native }
+          title {
+            romaji
+            english
+            native
+          }
           description(asHtml: false)
           episodes
           averageScore
-          coverImage { extraLarge large medium }
-          nextAiringEpisode { episode airingAt }
-          startDate { year month day }
+          status
+          format
+          coverImage {
+            extraLarge
+            large
+            medium
+          }
+          nextAiringEpisode {
+            episode
+            airingAt
+          }
+          startDate {
+            year
+            month
+            day
+          }
         }
       }
     }
@@ -229,11 +359,18 @@ def query_temporada_atual():
         "season": temporada_atual(),
         "seasonYear": agora_local().year,
         "page": 1,
-        "perPage": 5
+        "perPage": MAX_RESULTADOS
     }
-    return anilist_query(query, variables)["Page"]["media"]
+    resultado = anilist_query(query, variables)["Page"]["media"]
+    cache_set(cache_nome, resultado)
+    return resultado
 
 def query_novos_anunciados():
+    cache_nome = "novos_anunciados"
+    cache = cache_get(cache_nome)
+    if cache is not None:
+        return cache
+
     query = """
     query ($page: Int, $perPage: Int) {
       Page(page: $page, perPage: $perPage) {
@@ -246,21 +383,45 @@ def query_novos_anunciados():
         ) {
           id
           siteUrl
-          title { romaji english native }
+          title {
+            romaji
+            english
+            native
+          }
           description(asHtml: false)
           episodes
           averageScore
-          coverImage { extraLarge large medium }
-          nextAiringEpisode { episode airingAt }
-          startDate { year month day }
+          status
+          format
+          coverImage {
+            extraLarge
+            large
+            medium
+          }
+          nextAiringEpisode {
+            episode
+            airingAt
+          }
+          startDate {
+            year
+            month
+            day
+          }
         }
       }
     }
     """
-    variables = {"page": 1, "perPage": 5}
-    return anilist_query(query, variables)["Page"]["media"]
+    variables = {"page": 1, "perPage": MAX_RESULTADOS}
+    resultado = anilist_query(query, variables)["Page"]["media"]
+    cache_set(cache_nome, resultado)
+    return resultado
 
 def query_lancamentos_hoje():
+    cache_nome = f"lancamentos:{agora_local().strftime('%Y-%m-%d')}"
+    cache = cache_get(cache_nome)
+    if cache is not None:
+        return cache
+
     query = """
     query ($season: MediaSeason, $seasonYear: Int, $page: Int, $perPage: Int) {
       Page(page: $page, perPage: $perPage) {
@@ -275,13 +436,30 @@ def query_lancamentos_hoje():
         ) {
           id
           siteUrl
-          title { romaji english native }
+          title {
+            romaji
+            english
+            native
+          }
           description(asHtml: false)
           episodes
           averageScore
-          coverImage { extraLarge large medium }
-          nextAiringEpisode { episode airingAt }
-          startDate { year month day }
+          status
+          format
+          coverImage {
+            extraLarge
+            large
+            medium
+          }
+          nextAiringEpisode {
+            episode
+            airingAt
+          }
+          startDate {
+            year
+            month
+            day
+          }
         }
       }
     }
@@ -294,12 +472,20 @@ def query_lancamentos_hoje():
     }
     medias = anilist_query(query, variables)["Page"]["media"]
 
-    return [
+    resultado = [
         media for media in medias
         if media.get("nextAiringEpisode") and mesmo_dia_local(media["nextAiringEpisode"]["airingAt"])
     ]
 
+    cache_set(cache_nome, resultado)
+    return resultado
+
 def query_calendario_semanal():
+    cache_nome = f"semanal:{temporada_atual()}:{agora_local().year}"
+    cache = cache_get(cache_nome)
+    if cache is not None:
+        return cache
+
     query = """
     query ($season: MediaSeason, $seasonYear: Int, $page: Int, $perPage: Int) {
       Page(page: $page, perPage: $perPage) {
@@ -314,9 +500,20 @@ def query_calendario_semanal():
         ) {
           id
           siteUrl
-          title { romaji english native }
-          coverImage { extraLarge large medium }
-          nextAiringEpisode { episode airingAt }
+          title {
+            romaji
+            english
+            native
+          }
+          coverImage {
+            extraLarge
+            large
+            medium
+          }
+          nextAiringEpisode {
+            episode
+            airingAt
+          }
         }
       }
     }
@@ -327,8 +524,13 @@ def query_calendario_semanal():
         "page": 1,
         "perPage": 30
     }
-    return anilist_query(query, variables)["Page"]["media"]
+    resultado = anilist_query(query, variables)["Page"]["media"]
+    cache_set(cache_nome, resultado)
+    return resultado
 
+# =========================
+# EVENTOS
+# =========================
 @client.event
 async def on_ready():
     await tree.sync()
@@ -336,16 +538,35 @@ async def on_ready():
         verificar_notificacoes.start()
     print(f"Bot conectado como {client.user}")
 
+# =========================
+# COMANDOS
+# =========================
 @tree.command(name="ping", description="Testa se o bot está online")
 async def ping(interaction: discord.Interaction):
+    espera = em_cooldown(interaction.user.id, "ping")
+    if espera > 0:
+        await interaction.response.send_message(
+            f"⏳ Espera {espera}s antes de usar /ping de novo.",
+            ephemeral=True
+        )
+        return
+
     await interaction.response.send_message("pong 🏓")
 
 @tree.command(name="animetemp", description="Mostra os animes da temporada atual")
 async def animetemp(interaction: discord.Interaction):
-    await interaction.response.defer()
+    espera = em_cooldown(interaction.user.id, "animetemp")
+    if espera > 0:
+        await interaction.response.send_message(
+            f"⏳ Espera {espera}s antes de usar /animetemp de novo.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
 
     try:
-        animes = query_temporada_atual()
+        animes = await asyncio.to_thread(query_temporada_atual)
         temp = temporada_atual()
         ano = agora_local().year
 
@@ -358,19 +579,30 @@ async def animetemp(interaction: discord.Interaction):
         for anime in animes:
             extra = f"📢 Anime da temporada: {nome_temporada_pt(temp)} {ano}"
             prox = anime.get("nextAiringEpisode")
+
             if prox:
                 extra += f"\n📅 Próximo episódio: {prox.get('episode', '?')} em {formatar_timestamp_local(prox.get('airingAt'))}"
-            await interaction.followup.send(embed=criar_embed_anime(anime, extra))
+
+            embed = await asyncio.to_thread(criar_embed_anime, anime, extra)
+            await interaction.followup.send(embed=embed)
 
     except Exception as e:
         await interaction.followup.send(f"Erro ao buscar temporada: `{e}`")
 
 @tree.command(name="novo", description="Mostra novos animes anunciados / próximos")
 async def novo(interaction: discord.Interaction):
-    await interaction.response.defer()
+    espera = em_cooldown(interaction.user.id, "novo")
+    if espera > 0:
+        await interaction.response.send_message(
+            f"⏳ Espera {espera}s antes de usar /novo de novo.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
 
     try:
-        animes = query_novos_anunciados()
+        animes = await asyncio.to_thread(query_novos_anunciados)
 
         if not animes:
             await interaction.followup.send("Não encontrei novos animes anunciados.")
@@ -382,17 +614,26 @@ async def novo(interaction: discord.Interaction):
             inicio = anime.get("startDate", {})
             data_inicio = f"{inicio.get('day') or '??'}/{inicio.get('month') or '??'}/{inicio.get('year') or '????'}"
             extra = f"🆕 Novo anime anunciado\n📅 Estreia prevista: {data_inicio}"
-            await interaction.followup.send(embed=criar_embed_anime(anime, extra))
+            embed = await asyncio.to_thread(criar_embed_anime, anime, extra)
+            await interaction.followup.send(embed=embed)
 
     except Exception as e:
         await interaction.followup.send(f"Erro ao buscar novos animes: `{e}`")
 
 @tree.command(name="lancamento", description="Mostra animes que lançam hoje")
 async def lancamento(interaction: discord.Interaction):
-    await interaction.response.defer()
+    espera = em_cooldown(interaction.user.id, "lancamento")
+    if espera > 0:
+        await interaction.response.send_message(
+            f"⏳ Espera {espera}s antes de usar /lancamento de novo.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
 
     try:
-        animes = query_lancamentos_hoje()
+        animes = await asyncio.to_thread(query_lancamentos_hoje)
 
         if not animes:
             await interaction.followup.send("Hoje não encontrei lançamentos.")
@@ -400,24 +641,33 @@ async def lancamento(interaction: discord.Interaction):
 
         await interaction.followup.send("📺 **Animes com lançamento hoje:**")
 
-        for anime in animes[:5]:
+        for anime in animes[:MAX_RESULTADOS]:
             prox = anime.get("nextAiringEpisode", {})
             extra = (
                 "📺 Lançamento de hoje\n"
                 f"🎞️ Episódio: {prox.get('episode', '?')}\n"
                 f"⏰ Horário: {formatar_timestamp_local(prox.get('airingAt'))}"
             )
-            await interaction.followup.send(embed=criar_embed_anime(anime, extra))
+            embed = await asyncio.to_thread(criar_embed_anime, anime, extra)
+            await interaction.followup.send(embed=embed)
 
     except Exception as e:
         await interaction.followup.send(f"Erro ao buscar lançamentos: `{e}`")
 
 @tree.command(name="semanal", description="Mostra o calendário semanal da temporada atual")
 async def semanal(interaction: discord.Interaction):
-    await interaction.response.defer()
+    espera = em_cooldown(interaction.user.id, "semanal")
+    if espera > 0:
+        await interaction.response.send_message(
+            f"⏳ Espera {espera}s antes de usar /semanal de novo.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
 
     try:
-        animes = query_calendario_semanal()
+        animes = await asyncio.to_thread(query_calendario_semanal)
         agenda = {
             "Segunda": [],
             "Terça": [],
@@ -435,14 +685,15 @@ async def semanal(interaction: discord.Interaction):
 
             airing_at = prox.get("airingAt")
             episodio = prox.get("episode")
+
             if not airing_at:
                 continue
 
             dt = datetime.fromtimestamp(airing_at, tz=timezone.utc).astimezone()
             dia = nome_dia_pt(dt)
             titulo = melhor_titulo(anime)
-            linha = f"**{titulo}** — Ep {episodio or '?'} às {dt.strftime('%H:%M')}"
 
+            linha = f"**{titulo}** — Ep {episodio or '?'} às {dt.strftime('%H:%M')}"
             if dia in agenda:
                 agenda[dia].append((dt, linha))
 
@@ -471,6 +722,14 @@ async def semanal(interaction: discord.Interaction):
     app_commands.Choice(name="desligar", value="desligar")
 ])
 async def autonotify(interaction: discord.Interaction, acao: app_commands.Choice[str]):
+    espera = em_cooldown(interaction.user.id, "autonotify")
+    if espera > 0:
+        await interaction.response.send_message(
+            f"⏳ Espera {espera}s antes de usar /autonotify de novo.",
+            ephemeral=True
+        )
+        return
+
     dados = carregar_auto()
     canal_id = interaction.channel_id
 
@@ -485,6 +744,9 @@ async def autonotify(interaction: discord.Interaction, acao: app_commands.Choice
             salvar_auto(dados)
         await interaction.response.send_message("🛑 Notificação automática desligada neste canal.")
 
+# =========================
+# LOOP AUTOMÁTICO
+# =========================
 @tasks.loop(minutes=10)
 async def verificar_notificacoes():
     await client.wait_until_ready()
@@ -498,7 +760,7 @@ async def verificar_notificacoes():
         if data_hoje not in dados["avisados"]:
             dados["avisados"][data_hoje] = []
 
-        animes = query_lancamentos_hoje()
+        animes = await asyncio.to_thread(query_lancamentos_hoje)
 
         for anime in animes:
             anime_id = anime.get("id")
@@ -511,7 +773,7 @@ async def verificar_notificacoes():
                 f"🎞️ Episódio: {prox.get('episode', '?')}\n"
                 f"⏰ Horário: {formatar_timestamp_local(prox.get('airingAt'))}"
             )
-            embed = criar_embed_anime(anime, extra)
+            embed = await asyncio.to_thread(criar_embed_anime, anime, extra)
 
             for canal_id in dados["canais"]:
                 canal = client.get_channel(canal_id)
@@ -524,6 +786,9 @@ async def verificar_notificacoes():
     except Exception as e:
         print("Erro na notificação automática:", e)
 
+# =========================
+# START
+# =========================
 if __name__ == "__main__":
     print("Iniciando Flask...")
     keep_alive()
