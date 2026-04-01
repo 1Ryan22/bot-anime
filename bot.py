@@ -384,12 +384,14 @@ def query_calendario_semanal():
           id
           siteUrl
           title{romaji english native}
+          description(asHtml: false)
           coverImage{extraLarge large medium}
           nextAiringEpisode{episode airingAt}
           format
           status
           averageScore
           episodes
+          startDate{day month year}
         }
       }
     }
@@ -399,7 +401,7 @@ def query_calendario_semanal():
     return resultado
 
 # =========================
-# UI / NAVIGATOR
+# UI / ANIMETEMP
 # =========================
 class CategoriaSelect(discord.ui.Select):
     def __init__(self, parent_view):
@@ -554,6 +556,97 @@ class AnimeNavigator(discord.ui.View):
             pass
 
 # =========================
+# UI / SEMANAL
+# =========================
+class SemanalNavigator(discord.ui.View):
+    def __init__(self, agenda, autor_id, temporada_nome, timeout=300):
+        super().__init__(timeout=timeout)
+        self.agenda = agenda
+        self.autor_id = autor_id
+        self.temporada_nome = temporada_nome
+        self.dia_atual = "Segunda"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.autor_id:
+            await interaction.response.send_message(
+                "Só quem usou o comando pode mexer nesses botões.",
+                ephemeral=True
+            )
+            return False
+        return True
+
+    def criar_embed(self):
+        itens = self.agenda.get(self.dia_atual, [])
+
+        embed = discord.Embed(
+            title=f"📅 Calendário Semanal — {self.temporada_nome}",
+            description=f"🗓️ **{self.dia_atual}**",
+            color=COR_EMBED
+        )
+
+        if not itens:
+            embed.add_field(
+                name="Sem lançamentos",
+                value="Nada previsto para esse dia.",
+                inline=False
+            )
+        else:
+            texto = "\n\n".join(itens[:12])
+            embed.add_field(
+                name="Animes do dia",
+                value=texto[:1024],
+                inline=False
+            )
+
+        embed.set_footer(text="Escolha o dia nos botões abaixo")
+        return embed
+
+    async def atualizar(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=self.criar_embed(), view=self)
+
+    @discord.ui.button(label="Seg", style=discord.ButtonStyle.secondary, row=0)
+    async def segunda(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.dia_atual = "Segunda"
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="Ter", style=discord.ButtonStyle.secondary, row=0)
+    async def terca(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.dia_atual = "Terça"
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="Qua", style=discord.ButtonStyle.secondary, row=0)
+    async def quarta(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.dia_atual = "Quarta"
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="Qui", style=discord.ButtonStyle.secondary, row=0)
+    async def quinta(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.dia_atual = "Quinta"
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="Sex", style=discord.ButtonStyle.secondary, row=0)
+    async def sexta(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.dia_atual = "Sexta"
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="Sáb", style=discord.ButtonStyle.secondary, row=1)
+    async def sabado(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.dia_atual = "Sábado"
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="Dom", style=discord.ButtonStyle.secondary, row=1)
+    async def domingo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.dia_atual = "Domingo"
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="Fechar", style=discord.ButtonStyle.danger, row=1)
+    async def fechar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
+
+# =========================
 # COMANDOS
 # =========================
 @tree.command(name="ping", description="Mostra se o bot está online")
@@ -680,35 +773,33 @@ async def semanal(interaction: discord.Interaction):
 
             dt = datetime.fromtimestamp(prox["airingAt"], tz=timezone.utc).astimezone()
             dia = nome_dia_pt(dt)
+
             titulo = melhor_titulo(anime)
             formato = formato_pt(anime.get("format"))
             horario = dt.strftime("%H:%M")
             episodio = prox.get("episode", "?")
+            nota = anime.get("averageScore")
+            site = anime.get("siteUrl", "")
 
-            linha = f"• **{titulo}** ({formato})\n  Ep {episodio} às {horario}"
+            linha = (
+                f"**[{titulo}]({site})**\n"
+                f"🎞️ {formato} • ⭐ {nota if nota is not None else 'N/A'}\n"
+                f"📺 Ep {episodio} às {horario}"
+            )
+
             agenda[dia].append((dt, linha))
 
         for dia in agenda:
             agenda[dia].sort(key=lambda x: x[0])
+            agenda[dia] = [item[1] for item in agenda[dia]]
 
-        ordem = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+        view = SemanalNavigator(
+            agenda=agenda,
+            autor_id=interaction.user.id,
+            temporada_nome=nome_temporada_pt(temporada_atual())
+        )
 
-        for dia in ordem:
-            itens = agenda[dia]
-            texto = "\n".join([item[1] for item in itens[:12]]) if itens else "Nada previsto."
-
-            embed = discord.Embed(
-                title=f"📅 {dia}",
-                description="Lançamentos do dia organizados por horário.",
-                color=COR_EMBED
-            )
-            embed.add_field(
-                name="Animes",
-                value=texto[:1024],
-                inline=False
-            )
-            embed.set_footer(text=f"Calendário semanal • {nome_temporada_pt(temporada_atual())}")
-            await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=view.criar_embed(), view=view)
 
     except Exception as e:
         await interaction.followup.send(f"Erro ao montar /semanal: `{e}`")
@@ -776,20 +867,45 @@ async def verificar_notificacoes():
             titulo = melhor_titulo(anime)
             imagem = pegar_imagem_correta(anime)
 
+            sinopse = anime.get("description") or "Sem sinopse disponível."
+            sinopse = limpar_html(sinopse)
+            sinopse = traduzir_texto(sinopse)
+            if len(sinopse) > 220:
+                sinopse = sinopse[:220] + "..."
+
             embed = discord.Embed(
-                title=titulo,
+                title=f"🔔 {titulo}",
                 url=anime.get("siteUrl", ""),
-                description=(
-                    f"🔔 **Lançamento de hoje**\n"
-                    f"🎞️ {formato_pt(anime.get('format'))}\n"
-                    f"📺 Episódio {prox.get('episode', '?')}\n"
-                    f"⏰ {formatar_timestamp_local(prox.get('airingAt'))}"
-                ),
+                description="**Novo episódio lançado hoje**",
                 color=COR_EMBED
+            )
+
+            embed.add_field(
+                name="📺 Episódio",
+                value=str(prox.get("episode", "?")),
+                inline=True
+            )
+            embed.add_field(
+                name="🎞️ Formato",
+                value=formato_pt(anime.get("format")),
+                inline=True
+            )
+            embed.add_field(
+                name="⏰ Horário",
+                value=formatar_timestamp_local(prox.get("airingAt")),
+                inline=True
+            )
+
+            embed.add_field(
+                name="📖 Sinopse",
+                value=sinopse,
+                inline=False
             )
 
             if imagem:
                 embed.set_thumbnail(url=imagem)
+
+            embed.set_footer(text="Notificação automática de lançamento")
 
             for canal_id in dados["canais"]:
                 canal = client.get_channel(canal_id)
