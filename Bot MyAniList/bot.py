@@ -1,92 +1,532 @@
-import requests
-import time
-import json
 import os
-from datetime import datetime
+import json
+import requests
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from flask import Flask
+from threading import Thread
 
-WEBHOOK_URL = "https://discord.com/api/webhooks/1488317504471306280/6DPa-uWVxAwLutFU7r9QjkRVEl9DwINhCv4dgIXp-8oVBlLPaA_Zr5UVMkwAlwtcMq_j"
-STATE_FILE = "enviados.json"
+import discord
+from discord import app_commands
+from discord.ext import tasks
 
+# =========================
+# CONFIG
+# =========================
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+ANILIST_URL = "https://graphql.anilist.co"
+COR_EMBED = 0xFF8C00
+ARQUIVO_AUTO = "auto_notificacao.json"
+TZ_BR = ZoneInfo("America/Sao_Paulo")
+
+# =========================
+# FLASK PRA RENDER / UPTIMEROBOT
+# =========================
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot online!"
+
+def iniciar_web():
+    porta = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=porta)
+
+def keep_alive():
+    t = Thread(target=iniciar_web)
+    t.daemon = True
+    t.start()
+
+# =========================
+# DISCORD
+# =========================
+intents = discord.Intents.default()
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+# =========================
+# FUNÇÕES AUXILIARES
+# =========================
 def temporada_atual():
-    mes = datetime.now().month
-
+    mes = datetime.now(TZ_BR).month
     if mes in [1, 2, 3]:
-        return "winter"
+        return "WINTER"
     elif mes in [4, 5, 6]:
-        return "spring"
+        return "SPRING"
     elif mes in [7, 8, 9]:
-        return "summer"
-    else:
-        return "fall"
+        return "SUMMER"
+    return "FALL"
 
-def carregar_enviados():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+def nome_temporada_pt(temp):
+    nomes = {
+        "WINTER": "Inverno",
+        "SPRING": "Primavera",
+        "SUMMER": "Verão",
+        "FALL": "Outono"
+    }
+    return nomes.get(temp, temp)
+
+def nome_dia_pt(data):
+    dias = {
+        0: "Segunda",
+        1: "Terça",
+        2: "Quarta",
+        3: "Quinta",
+        4: "Sexta",
+        5: "Sábado",
+        6: "Domingo"
+    }
+    return dias[data.weekday()]
+
+def carregar_auto():
+    if os.path.exists(ARQUIVO_AUTO):
+        with open(ARQUIVO_AUTO, "r", encoding="utf-8") as f:
             return json.load(f)
-    return []
+    return {"canais": [], "avisados": {}}
 
-def salvar_enviados(lista):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(lista, f)
+def salvar_auto(dados):
+    with open(ARQUIVO_AUTO, "w", encoding="utf-8") as f:
+        json.dump(dados, f, ensure_ascii=False, indent=2)
 
-def enviar_discord(anime):
-    titulo = anime["title"]
-    url = anime["url"]
-    imagem = anime["images"]["jpg"]["image_url"]
-    score = anime.get("score", "N/A")
-    eps = anime.get("episodes", "?")
-    synopsis = anime.get("synopsis", "Sem sinopse disponível.")
+def anilist_query(query: str, variables: dict | None = None) -> dict:
+    resposta = requests.post(
+        ANILIST_URL,
+        json={"query": query, "variables": variables or {}},
+        timeout=20
+    )
+    resposta.raise_for_status()
+    data = resposta.json()
 
-    if synopsis:
-        synopsis = synopsis[:250] + "..." if len(synopsis) > 250 else synopsis
+    if "errors" in data:
+        raise Exception(str(data["errors"]))
 
-    embed = {
-        "title": titulo,
-        "url": url,
-        "description": f"⭐ Nota: {score}\n🎬 Episódios: {eps}\n\n📖 {synopsis}",
-        "image": {"url": imagem},
-        "color": 16753920
+    return data["data"]
+
+def formatar_timestamp_br(ts):
+    if not ts:
+        return "Data não informada"
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(TZ_BR)
+    return dt.strftime("%d/%m/%Y %H:%M")
+
+def mesmo_dia_br(ts):
+    if not ts:
+        return False
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(TZ_BR).date()
+    hoje = datetime.now(TZ_BR).date()
+    return dt == hoje
+
+def criar_embed_anime(media: dict, titulo_extra: str | None = None) -> discord.Embed:
+    titulo = (
+        media.get("title", {}).get("romaji")
+        or media.get("title", {}).get("english")
+        or media.get("title", {}).get("native")
+        or "Sem título"
+    )
+
+    url = media.get("siteUrl", "")
+    imagem = media.get("coverImage", {}).get("large", "")
+    nota = media.get("averageScore", "N/A")
+    episodios = media.get("episodes", "?")
+    sinopse = media.get("description") or "Sem sinopse disponível."
+    sinopse = (
+        sinopse.replace("<br>", "\n")
+        .replace("<i>", "")
+        .replace("</i>", "")
+        .replace("<b>", "")
+        .replace("</b>", "")
+    )
+
+    if len(sinopse) > 300:
+        sinopse = sinopse[:300] + "..."
+
+    descricao = f"⭐ Nota: {nota}\n🎬 Episódios: {episodios}\n\n📖 {sinopse}"
+
+    if titulo_extra:
+        descricao = f"{titulo_extra}\n\n{descricao}"
+
+    embed = discord.Embed(
+        title=titulo,
+        url=url,
+        description=descricao,
+        color=COR_EMBED
+    )
+
+    if imagem:
+        embed.set_image(url=imagem)
+
+    return embed
+
+def query_temporada_atual():
+    query = """
+    query ($season: MediaSeason, $seasonYear: Int, $page: Int, $perPage: Int) {
+      Page(page: $page, perPage: $perPage) {
+        media(
+          type: ANIME,
+          season: $season,
+          seasonYear: $seasonYear,
+          sort: POPULARITY_DESC
+        ) {
+          id
+          siteUrl
+          title {
+            romaji
+            english
+            native
+          }
+          description(asHtml: false)
+          episodes
+          averageScore
+          status
+          format
+          coverImage {
+            large
+          }
+          nextAiringEpisode {
+            episode
+            airingAt
+          }
+          startDate {
+            year
+            month
+            day
+          }
+        }
+      }
     }
-
-    payload = {
-        "embeds": [embed]
+    """
+    variables = {
+        "season": temporada_atual(),
+        "seasonYear": datetime.now(TZ_BR).year,
+        "page": 1,
+        "perPage": 10
     }
+    return anilist_query(query, variables)["Page"]["media"]
 
-    response = requests.post(WEBHOOK_URL, json=payload)
+def query_novos_anunciados():
+    query = """
+    query ($page: Int, $perPage: Int) {
+      Page(page: $page, perPage: $perPage) {
+        media(
+          type: ANIME,
+          status: NOT_YET_RELEASED,
+          sort: POPULARITY_DESC
+        ) {
+          id
+          siteUrl
+          title {
+            romaji
+            english
+            native
+          }
+          description(asHtml: false)
+          episodes
+          averageScore
+          status
+          format
+          coverImage {
+            large
+          }
+          nextAiringEpisode {
+            episode
+            airingAt
+          }
+          startDate {
+            year
+            month
+            day
+          }
+        }
+      }
+    }
+    """
+    variables = {"page": 1, "perPage": 10}
+    return anilist_query(query, variables)["Page"]["media"]
 
-    if response.status_code in [200, 204]:
-        print(f"Enviado: {titulo}")
-    else:
-        print("Erro ao enviar pro Discord:", response.status_code, response.text)
+def query_lancamentos_hoje():
+    query = """
+    query ($season: MediaSeason, $seasonYear: Int, $page: Int, $perPage: Int) {
+      Page(page: $page, perPage: $perPage) {
+        media(
+          type: ANIME,
+          season: $season,
+          seasonYear: $seasonYear,
+          status: RELEASING,
+          sort: POPULARITY_DESC
+        ) {
+          id
+          siteUrl
+          title {
+            romaji
+            english
+            native
+          }
+          description(asHtml: false)
+          episodes
+          averageScore
+          status
+          format
+          coverImage {
+            large
+          }
+          nextAiringEpisode {
+            episode
+            airingAt
+          }
+          startDate {
+            year
+            month
+            day
+          }
+        }
+      }
+    }
+    """
+    variables = {
+        "season": temporada_atual(),
+        "seasonYear": datetime.now(TZ_BR).year,
+        "page": 1,
+        "perPage": 50
+    }
+    medias = anilist_query(query, variables)["Page"]["media"]
+    return [
+        media for media in medias
+        if media.get("nextAiringEpisode") and mesmo_dia_br(media["nextAiringEpisode"]["airingAt"])
+    ]
 
-def main():
-    enviados = carregar_enviados()
+def query_calendario_semanal():
+    query = """
+    query ($season: MediaSeason, $seasonYear: Int, $page: Int, $perPage: Int) {
+      Page(page: $page, perPage: $perPage) {
+        media(
+          type: ANIME,
+          season: $season,
+          seasonYear: $seasonYear,
+          status: RELEASING,
+          sort: POPULARITY_DESC
+        ) {
+          id
+          siteUrl
+          title {
+            romaji
+            english
+            native
+          }
+          nextAiringEpisode {
+            episode
+            airingAt
+          }
+        }
+      }
+    }
+    """
+    variables = {
+        "season": temporada_atual(),
+        "seasonYear": datetime.now(TZ_BR).year,
+        "page": 1,
+        "perPage": 50
+    }
+    return anilist_query(query, variables)["Page"]["media"]
 
-    while True:
-        ano = datetime.now().year
+# =========================
+# EVENTOS
+# =========================
+@client.event
+async def on_ready():
+    await tree.sync()
+    if not verificar_notificacoes.is_running():
+        verificar_notificacoes.start()
+    print(f"Bot conectado como {client.user}")
+
+# =========================
+# COMANDOS
+# =========================
+@tree.command(name="ping", description="Testa se o bot está online")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message("pong 🏓")
+
+@tree.command(name="animetemp", description="Mostra os animes da temporada atual")
+async def animetemp(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    try:
+        animes = query_temporada_atual()
         temp = temporada_atual()
-        url = f"https://api.jikan.moe/v4/seasons/{ano}/{temp}"
+        ano = datetime.now(TZ_BR).year
 
-        print(f"Buscando animes de {temp} {ano}...")
+        if not animes:
+            await interaction.followup.send("Não encontrei animes da temporada atual.")
+            return
 
-        try:
-            r = requests.get(url, timeout=15)
-            data = r.json().get("data", [])
+        await interaction.followup.send(f"🎌 **Temporada atual:** {nome_temporada_pt(temp)} {ano}")
 
-            for anime in data:
-                anime_id = anime["mal_id"]
+        for anime in animes:
+            extra = f"📢 Anime da temporada: {nome_temporada_pt(temp)} {ano}"
+            prox = anime.get("nextAiringEpisode")
+            if prox:
+                extra += f"\n📅 Próximo episódio: {prox.get('episode', '?')} em {formatar_timestamp_br(prox.get('airingAt'))}"
+            await interaction.followup.send(embed=criar_embed_anime(anime, extra))
 
-                if anime_id not in enviados:
-                    enviar_discord(anime)
-                    enviados.append(anime_id)
-                    salvar_enviados(enviados)
-                    time.sleep(2)
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao buscar temporada: `{e}`")
 
-        except Exception as e:
-            print("Erro:", e)
+@tree.command(name="novo", description="Mostra novos animes anunciados / próximos")
+async def novo(interaction: discord.Interaction):
+    await interaction.response.defer()
 
-        print("Esperando 1 hora para verificar de novo...\n")
-        time.sleep(600)
+    try:
+        animes = query_novos_anunciados()
 
+        if not animes:
+            await interaction.followup.send("Não encontrei novos animes anunciados.")
+            return
+
+        await interaction.followup.send("🆕 **Novos animes anunciados / próximos:**")
+
+        for anime in animes:
+            inicio = anime.get("startDate", {})
+            data_inicio = f"{inicio.get('day') or '??'}/{inicio.get('month') or '??'}/{inicio.get('year') or '????'}"
+            extra = f"🆕 Novo anime anunciado\n📅 Estreia prevista: {data_inicio}"
+            await interaction.followup.send(embed=criar_embed_anime(anime, extra))
+
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao buscar novos animes: `{e}`")
+
+@tree.command(name="lancamento", description="Mostra animes que lançam hoje")
+async def lancamento(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    try:
+        animes = query_lancamentos_hoje()
+
+        if not animes:
+            await interaction.followup.send("Hoje não encontrei lançamentos.")
+            return
+
+        await interaction.followup.send("📺 **Animes com lançamento hoje:**")
+
+        for anime in animes[:10]:
+            prox = anime.get("nextAiringEpisode", {})
+            extra = (
+                "📺 Lançamento de hoje\n"
+                f"🎞️ Episódio: {prox.get('episode', '?')}\n"
+                f"⏰ Horário: {formatar_timestamp_br(prox.get('airingAt'))}"
+            )
+            await interaction.followup.send(embed=criar_embed_anime(anime, extra))
+
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao buscar lançamentos: `{e}`")
+
+@tree.command(name="semanal", description="Mostra o calendário semanal da temporada atual")
+async def semanal(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    try:
+        animes = query_calendario_semanal()
+        agenda = {}
+
+        for anime in animes:
+            prox = anime.get("nextAiringEpisode")
+            if not prox or not prox.get("airingAt"):
+                continue
+
+            dt = datetime.fromtimestamp(prox["airingAt"], tz=timezone.utc).astimezone(TZ_BR)
+            dia = nome_dia_pt(dt)
+            titulo = (
+                anime.get("title", {}).get("romaji")
+                or anime.get("title", {}).get("english")
+                or anime.get("title", {}).get("native")
+                or "Sem título"
+            )
+            linha = f"**{titulo}** — Ep {prox.get('episode', '?')} às {dt.strftime('%H:%M')}"
+            agenda.setdefault(dia, []).append(linha)
+
+        embed = discord.Embed(
+            title=f"📅 Calendário semanal — {nome_temporada_pt(temporada_atual())} {datetime.now(TZ_BR).year}",
+            color=COR_EMBED
+        )
+
+        ordem = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+
+        for dia in ordem:
+            lista = agenda.get(dia, [])
+            texto = "\n".join(lista[:10]) if lista else "Nenhum anime encontrado."
+            embed.add_field(name=dia, value=texto[:1024], inline=False)
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao montar calendário semanal: `{e}`")
+
+@tree.command(name="autonotify", description="Liga ou desliga notificações automáticas neste canal")
+@app_commands.describe(acao="Escolha ligar ou desligar")
+@app_commands.choices(acao=[
+    app_commands.Choice(name="ligar", value="ligar"),
+    app_commands.Choice(name="desligar", value="desligar")
+])
+async def autonotify(interaction: discord.Interaction, acao: app_commands.Choice[str]):
+    dados = carregar_auto()
+    canal_id = interaction.channel_id
+
+    if acao.value == "ligar":
+        if canal_id not in dados["canais"]:
+            dados["canais"].append(canal_id)
+            salvar_auto(dados)
+        await interaction.response.send_message("✅ Notificação automática ligada neste canal.")
+    else:
+        if canal_id in dados["canais"]:
+            dados["canais"].remove(canal_id)
+            salvar_auto(dados)
+        await interaction.response.send_message("🛑 Notificação automática desligada neste canal.")
+
+# =========================
+# LOOP AUTOMÁTICO
+# =========================
+@tasks.loop(minutes=10)
+async def verificar_notificacoes():
+    await client.wait_until_ready()
+
+    try:
+        dados = carregar_auto()
+        if not dados["canais"]:
+            return
+
+        data_hoje = datetime.now(TZ_BR).strftime("%Y-%m-%d")
+        if data_hoje not in dados["avisados"]:
+            dados["avisados"][data_hoje] = []
+
+        animes = query_lancamentos_hoje()
+
+        for anime in animes:
+            anime_id = anime.get("id")
+            if not anime_id or anime_id in dados["avisados"][data_hoje]:
+                continue
+
+            prox = anime.get("nextAiringEpisode", {})
+            extra = (
+                "🔔 Lançamento de hoje\n"
+                f"🎞️ Episódio: {prox.get('episode', '?')}\n"
+                f"⏰ Horário: {formatar_timestamp_br(prox.get('airingAt'))}"
+            )
+            embed = criar_embed_anime(anime, extra)
+
+            for canal_id in dados["canais"]:
+                canal = client.get_channel(canal_id)
+                if canal:
+                    await canal.send(embed=embed)
+
+            dados["avisados"][data_hoje].append(anime_id)
+            salvar_auto(dados)
+
+    except Exception as e:
+        print("Erro na notificação automática:", e)
+
+# =========================
+# START
+# =========================
 if __name__ == "__main__":
-    main()
+    keep_alive()
+
+    if not DISCORD_TOKEN:
+        raise ValueError("DISCORD_TOKEN não foi definido nas variáveis de ambiente.")
+
+    client.run(DISCORD_TOKEN)
