@@ -1,8 +1,8 @@
 import os
 import json
 import time
-import math
 import asyncio
+import math
 import requests
 from datetime import datetime, timezone
 from flask import Flask
@@ -23,7 +23,6 @@ ARQUIVO_AUTO = "auto_notificacao.json"
 
 COOLDOWN_SEGUNDOS = 5
 CACHE_SEGUNDOS = 120
-ITENS_POR_PAGINA = 8
 
 cooldowns = {}
 cache_memoria = {}
@@ -89,6 +88,28 @@ def nome_dia_pt(data):
         6: "Domingo"
     }
     return dias[data.weekday()]
+
+def formato_pt(media_format):
+    formatos = {
+        "TV": "TV",
+        "TV_SHORT": "TV Curto",
+        "MOVIE": "Filme",
+        "SPECIAL": "Especial",
+        "OVA": "OVA",
+        "ONA": "ONA",
+        "MUSIC": "Música"
+    }
+    return formatos.get(media_format, media_format or "N/A")
+
+def status_pt(status):
+    mapa = {
+        "FINISHED": "Finalizado",
+        "RELEASING": "Em lançamento",
+        "NOT_YET_RELEASED": "Não lançado",
+        "CANCELLED": "Cancelado",
+        "HIATUS": "Hiato"
+    }
+    return mapa.get(status, status or "N/A")
 
 def carregar_auto():
     if os.path.exists(ARQUIVO_AUTO):
@@ -246,78 +267,6 @@ def pegar_imagem_correta(media):
         return img_jikan
     return imagem_anilist(media)
 
-def formato_pt(media_format):
-    formatos = {
-        "TV": "TV",
-        "TV_SHORT": "TV Curto",
-        "MOVIE": "Filme",
-        "SPECIAL": "Especial",
-        "OVA": "OVA",
-        "ONA": "ONA",
-        "MUSIC": "Música"
-    }
-    return formatos.get(media_format, media_format or "N/A")
-
-def status_pt(status):
-    mapa = {
-        "FINISHED": "Finalizado",
-        "RELEASING": "Em lançamento",
-        "NOT_YET_RELEASED": "Não lançado",
-        "CANCELLED": "Cancelado",
-        "HIATUS": "Hiato"
-    }
-    return mapa.get(status, status or "N/A")
-
-def montar_linha_anime(media, tipo="geral"):
-    titulo = melhor_titulo(media)
-    link = media.get("siteUrl", "")
-    nota = media.get("averageScore")
-    formato = formato_pt(media.get("format"))
-    status = status_pt(media.get("status"))
-    episodios = media.get("episodes") if media.get("episodes") is not None else "N/A"
-
-    base = f"**[{titulo}]({link})**\n🎞️ {formato} • ⭐ {nota if nota is not None else 'N/A'} • 📺 {episodios} eps • 📡 {status}"
-
-    if tipo == "novo":
-        inicio = media.get("startDate", {})
-        data_inicio = f"{inicio.get('day') or '??'}/{inicio.get('month') or '??'}/{inicio.get('year') or '????'}"
-        base += f"\n🗓️ Estreia: {data_inicio}"
-
-    if tipo == "lancamento":
-        prox = media.get("nextAiringEpisode", {})
-        base += f"\n⏰ Ep {prox.get('episode', '?')} em {formatar_timestamp_local(prox.get('airingAt'))}"
-
-    if tipo == "temporada":
-        prox = media.get("nextAiringEpisode")
-        if prox:
-            base += f"\n📅 Próximo ep {prox.get('episode', '?')} em {formatar_timestamp_local(prox.get('airingAt'))}"
-
-    return base
-
-def criar_embed_pagina(titulo, descricao_topo, itens, pagina, total_paginas, tipo="geral"):
-    embed = discord.Embed(
-        title=titulo,
-        description=descricao_topo,
-        color=COR_EMBED
-    )
-
-    inicio = pagina * ITENS_POR_PAGINA
-    fim = inicio + ITENS_POR_PAGINA
-    bloco = itens[inicio:fim]
-
-    for i, item in enumerate(bloco, start=inicio + 1):
-        nome = f"{i}. {melhor_titulo(item)}"
-        valor = montar_linha_anime(item, tipo=tipo)
-        embed.add_field(name=nome[:256], value=valor[:1024], inline=False)
-
-    if itens:
-        imagem = pegar_imagem_correta(bloco[0])
-        if imagem:
-            embed.set_thumbnail(url=imagem)
-
-    embed.set_footer(text=f"Página {pagina + 1}/{total_paginas} • Total: {len(itens)}")
-    return embed
-
 def cache_get(nome):
     agora = time.time()
     if nome in cache_memoria:
@@ -340,19 +289,8 @@ def em_cooldown(user_id, comando):
     cooldowns[chave] = agora
     return 0
 
-async def enviar_paginas(interaction, titulo, descricao, itens, tipo="geral"):
-    if not itens:
-        await interaction.followup.send("Nenhum resultado encontrado.")
-        return
-
-    total_paginas = math.ceil(len(itens) / ITENS_POR_PAGINA)
-
-    for pagina in range(total_paginas):
-        embed = criar_embed_pagina(titulo, descricao, itens, pagina, total_paginas, tipo=tipo)
-        await interaction.followup.send(embed=embed)
-
 # =========================
-# QUERIES ANILIST
+# QUERIES
 # =========================
 def query_temporada_atual():
     cache_nome = f"temporada:{temporada_atual()}:{agora_local().year}"
@@ -389,7 +327,7 @@ def query_temporada_atual():
         "season": temporada_atual(),
         "seasonYear": agora_local().year,
         "page": 1,
-        "perPage": 50
+        "perPage": 100
     }
     resultado = anilist_query(query, variables)["Page"]["media"]
     cache_set(cache_nome, resultado)
@@ -425,7 +363,7 @@ def query_novos_anunciados():
       }
     }
     """
-    variables = {"page": 1, "perPage": 50}
+    variables = {"page": 1, "perPage": 100}
     resultado = anilist_query(query, variables)["Page"]["media"]
     cache_set(cache_nome, resultado)
     return resultado
@@ -474,7 +412,6 @@ def query_lancamentos_hoje():
         media for media in medias
         if media.get("nextAiringEpisode") and mesmo_dia_local(media["nextAiringEpisode"]["airingAt"])
     ]
-
     cache_set(cache_nome, resultado)
     return resultado
 
@@ -519,6 +456,168 @@ def query_calendario_semanal():
     return resultado
 
 # =========================
+# VIEW DE NAVEGAÇÃO
+# =========================
+class AnimeNavigator(discord.ui.View):
+    def __init__(self, itens, titulo, descricao, autor_id, tipo="temporada", timeout=300):
+        super().__init__(timeout=timeout)
+        self.itens = itens
+        self.titulo = titulo
+        self.descricao = descricao
+        self.autor_id = autor_id
+        self.tipo = tipo
+        self.categoria_atual = "TV"
+        self.pagina = 0
+        self.por_pagina = 1 if tipo in ["temporada", "novo", "lancamento"] else 8
+        self.categorias = ["TV", "MOVIE", "OVA", "ONA", "SPECIAL"]
+
+    def filtrar_itens(self):
+        return [item for item in self.itens if item.get("format") == self.categoria_atual]
+
+    def total_paginas(self):
+        filtrados = self.filtrar_itens()
+        if not filtrados:
+            return 1
+        return math.ceil(len(filtrados) / self.por_pagina)
+
+    def criar_embed(self):
+        filtrados = self.filtrar_itens()
+
+        nome_cat = formato_pt(self.categoria_atual)
+        embed = discord.Embed(
+            title=f"{self.titulo} • {nome_cat}",
+            description=self.descricao,
+            color=COR_EMBED
+        )
+
+        if not filtrados:
+            embed.add_field(
+                name="Sem resultados",
+                value="Nenhum anime encontrado nessa categoria.",
+                inline=False
+            )
+            embed.set_footer(text=f"Categoria: {nome_cat} • Página 1/1")
+            return embed
+
+        inicio = self.pagina * self.por_pagina
+        fim = inicio + self.por_pagina
+        bloco = filtrados[inicio:fim]
+
+        if self.tipo in ["temporada", "novo", "lancamento"]:
+            anime = bloco[0]
+            titulo = melhor_titulo(anime)
+            link = anime.get("siteUrl", "")
+            nota = anime.get("averageScore")
+            episodios = anime.get("episodes")
+            formato = formato_pt(anime.get("format"))
+            status = status_pt(anime.get("status"))
+            imagem = pegar_imagem_correta(anime)
+
+            sinopse = anime.get("description") or "Sem sinopse disponível."
+            sinopse = limpar_html(sinopse)
+            sinopse = traduzir_texto(sinopse)
+            if len(sinopse) > 500:
+                sinopse = sinopse[:500] + "..."
+
+            texto = (
+                f"**[{titulo}]({link})**\n"
+                f"🎞️ {formato}\n"
+                f"⭐ Nota: {nota if nota is not None else 'N/A'}\n"
+                f"📺 Episódios: {episodios if episodios is not None else 'N/A'}\n"
+                f"📡 Status: {status}"
+            )
+
+            if self.tipo == "temporada":
+                prox = anime.get("nextAiringEpisode")
+                if prox:
+                    texto += f"\n📅 Próximo episódio: {prox.get('episode', '?')} em {formatar_timestamp_local(prox.get('airingAt'))}"
+
+            if self.tipo == "novo":
+                inicio_data = anime.get("startDate", {})
+                data_fmt = f"{inicio_data.get('day') or '??'}/{inicio_data.get('month') or '??'}/{inicio_data.get('year') or '????'}"
+                texto += f"\n🗓️ Estreia prevista: {data_fmt}"
+
+            if self.tipo == "lancamento":
+                prox = anime.get("nextAiringEpisode", {})
+                texto += f"\n⏰ Episódio {prox.get('episode', '?')} em {formatar_timestamp_local(prox.get('airingAt'))}"
+
+            texto += f"\n\n📖 {sinopse}"
+
+            embed.add_field(name=titulo[:256], value=texto[:1024], inline=False)
+
+            if imagem:
+                embed.set_image(url=imagem)
+
+        else:
+            for anime in bloco:
+                prox = anime.get("nextAiringEpisode")
+                if not prox or not prox.get("airingAt"):
+                    continue
+
+                dt = datetime.fromtimestamp(prox["airingAt"], tz=timezone.utc).astimezone()
+                titulo = melhor_titulo(anime)
+                valor = f"Ep {prox.get('episode', '?')} às {dt.strftime('%H:%M')}"
+                embed.add_field(name=titulo[:256], value=valor[:1024], inline=False)
+
+        embed.set_footer(
+            text=f"Categoria: {nome_cat} • Página {self.pagina + 1}/{self.total_paginas()} • Total: {len(filtrados)}"
+        )
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.autor_id:
+            await interaction.response.send_message(
+                "Só quem usou o comando pode mexer nesses botões.",
+                ephemeral=True
+            )
+            return False
+        return True
+
+    async def atualizar(self, interaction: discord.Interaction):
+        total = self.total_paginas()
+        if self.pagina < 0:
+            self.pagina = 0
+        if self.pagina >= total:
+            self.pagina = total - 1
+
+        embed = self.criar_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Voltar", style=discord.ButtonStyle.secondary)
+    async def voltar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.pagina -= 1
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="Próximo", style=discord.ButtonStyle.primary)
+    async def proximo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.pagina += 1
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="TV", style=discord.ButtonStyle.success)
+    async def cat_tv(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.categoria_atual = "TV"
+        self.pagina = 0
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="Filmes", style=discord.ButtonStyle.success)
+    async def cat_filme(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.categoria_atual = "MOVIE"
+        self.pagina = 0
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="OVA", style=discord.ButtonStyle.success)
+    async def cat_ova(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.categoria_atual = "OVA"
+        self.pagina = 0
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="ONA", style=discord.ButtonStyle.success)
+    async def cat_ona(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.categoria_atual = "ONA"
+        self.pagina = 0
+        await self.atualizar(interaction)
+
+# =========================
 # EVENTOS
 # =========================
 @client.event
@@ -560,13 +659,15 @@ async def animetemp(interaction: discord.Interaction):
         temp = temporada_atual()
         ano = agora_local().year
 
-        await enviar_paginas(
-            interaction,
-            f"🎌 Temporada Atual — {nome_temporada_pt(temp)} {ano}",
-            "Lista organizada dos animes da temporada atual.",
-            animes,
+        view = AnimeNavigator(
+            itens=animes,
+            titulo=f"🎌 Temporada Atual — {nome_temporada_pt(temp)} {ano}",
+            descricao="Navegue pelos animes da temporada usando os botões.",
+            autor_id=interaction.user.id,
             tipo="temporada"
         )
+
+        await interaction.followup.send(embed=view.criar_embed(), view=view)
 
     except Exception as e:
         await interaction.followup.send(f"Erro ao buscar temporada: `{e}`")
@@ -586,13 +687,15 @@ async def novo(interaction: discord.Interaction):
     try:
         animes = await asyncio.to_thread(query_novos_anunciados)
 
-        await enviar_paginas(
-            interaction,
-            "🆕 Novos Animes Anunciados",
-            "Lista organizada dos próximos animes anunciados.",
-            animes,
+        view = AnimeNavigator(
+            itens=animes,
+            titulo="🆕 Novos Animes Anunciados",
+            descricao="Use os botões para navegar pelos anúncios.",
+            autor_id=interaction.user.id,
             tipo="novo"
         )
+
+        await interaction.followup.send(embed=view.criar_embed(), view=view)
 
     except Exception as e:
         await interaction.followup.send(f"Erro ao buscar novos animes: `{e}`")
@@ -612,13 +715,15 @@ async def lancamento(interaction: discord.Interaction):
     try:
         animes = await asyncio.to_thread(query_lancamentos_hoje)
 
-        await enviar_paginas(
-            interaction,
-            "📺 Lançamentos de Hoje",
-            "Todos os animes encontrados com lançamento hoje.",
-            animes,
+        view = AnimeNavigator(
+            itens=animes,
+            titulo="📺 Lançamentos de Hoje",
+            descricao="Use os botões para navegar pelos lançamentos.",
+            autor_id=interaction.user.id,
             tipo="lancamento"
         )
+
+        await interaction.followup.send(embed=view.criar_embed(), view=view)
 
     except Exception as e:
         await interaction.followup.send(f"Erro ao buscar lançamentos: `{e}`")
@@ -649,20 +754,15 @@ async def semanal(interaction: discord.Interaction):
 
         for anime in animes:
             prox = anime.get("nextAiringEpisode")
-            if not prox:
+            if not prox or not prox.get("airingAt"):
                 continue
 
-            airing_at = prox.get("airingAt")
-            episodio = prox.get("episode")
-            if not airing_at:
-                continue
-
-            dt = datetime.fromtimestamp(airing_at, tz=timezone.utc).astimezone()
+            dt = datetime.fromtimestamp(prox["airingAt"], tz=timezone.utc).astimezone()
             dia = nome_dia_pt(dt)
             titulo = melhor_titulo(anime)
             formato = formato_pt(anime.get("format"))
 
-            linha = f"**{titulo}** — {formato} • Ep {episodio or '?'} às {dt.strftime('%H:%M')}"
+            linha = f"**{titulo}** — {formato} • Ep {prox.get('episode', '?')} às {dt.strftime('%H:%M')}"
             if dia in agenda:
                 agenda[dia].append((dt, linha))
 
@@ -737,13 +837,24 @@ async def verificar_notificacoes():
             if not anime_id or anime_id in dados["avisados"][data_hoje]:
                 continue
 
+            titulo = melhor_titulo(anime)
             prox = anime.get("nextAiringEpisode", {})
-            extra = (
-                "🔔 Lançamento de hoje\n"
-                f"🎞️ Episódio: {prox.get('episode', '?')}\n"
-                f"⏰ Horário: {formatar_timestamp_local(prox.get('airingAt'))}"
+            imagem = pegar_imagem_correta(anime)
+
+            embed = discord.Embed(
+                title=titulo,
+                url=anime.get("siteUrl", ""),
+                description=(
+                    "🔔 Lançamento de hoje\n"
+                    f"🎞️ {formato_pt(anime.get('format'))}\n"
+                    f"📺 Episódio: {prox.get('episode', '?')}\n"
+                    f"⏰ Horário: {formatar_timestamp_local(prox.get('airingAt'))}"
+                ),
+                color=COR_EMBED
             )
-            embed = await asyncio.to_thread(criar_embed_anime, anime, extra)
+
+            if imagem:
+                embed.set_thumbnail(url=imagem)
 
             for canal_id in dados["canais"]:
                 canal = client.get_channel(canal_id)
