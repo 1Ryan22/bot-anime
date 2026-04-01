@@ -298,10 +298,64 @@ def salvar_auto(dados):
     with open(ARQUIVO_AUTO, "w", encoding="utf-8") as f:
         json.dump(dados, f, ensure_ascii=False, indent=2)
 
+# =========================
+# EMBEDS
+# =========================
 def criar_embed_info(anime, titulo_embed, subtitulo):
     titulo = melhor_titulo(anime)
     link = anime.get("siteUrl", "")
     imagem = pegar_imagem_correta(anime)
+    nota = anime.get("averageScore")
+    episodios = anime.get("episodes")
+    formato = formato_pt(anime.get("format"))
+    status = status_pt(anime.get("status"))
+    estreia = formatar_data_inicio(anime.get("startDate"))
+
+    prox = anime.get("nextAiringEpisode")
+    prox_texto = "N/A"
+    if prox:
+        prox_texto = f"Ep {prox.get('episode', '?')} • {formatar_timestamp_local(prox.get('airingAt'))}"
+
+    sinopse = anime.get("description") or "Sem sinopse disponível."
+    sinopse = limpar_html(sinopse)
+    sinopse = traduzir_texto(sinopse)
+    if len(sinopse) > 350:
+        sinopse = sinopse[:350] + "..."
+
+    embed = discord.Embed(
+        title=titulo_embed,
+        description=subtitulo,
+        color=COR_EMBED
+    )
+
+    embed.add_field(
+        name=f"🎬 **[{titulo}]({link})**",
+        value=(
+            f"⭐ **Nota:** `{nota if nota is not None else 'N/A'}`\n"
+            f"🎞️ **Formato:** `{formato}`\n"
+            f"📺 **Episódios:** `{episodios if episodios is not None else 'N/A'}`\n"
+            f"📡 **Status:** `{status}`\n"
+            f"🗓️ **Estreia:** `{estreia}`\n"
+            f"⏭️ **Próximo:** `{prox_texto}`"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📖 **Sinopse**",
+        value=sinopse,
+        inline=False
+    )
+
+    if imagem:
+        embed.set_image(url=imagem)
+
+    return embed
+
+def criar_embed_info_semanal(anime, titulo_embed, subtitulo):
+    titulo = melhor_titulo(anime)
+    link = anime.get("siteUrl", "")
+    imagem = imagem_anilist(anime)
     nota = anime.get("averageScore")
     episodios = anime.get("episodes")
     formato = formato_pt(anime.get("format"))
@@ -614,7 +668,7 @@ class SemanalAnimeNavigator(discord.ui.View):
             return embed
 
         anime = lista[self.page]
-        embed = criar_embed_info(
+        embed = criar_embed_info_semanal(
             anime,
             f"📅 Calendário Semanal — {self.temporada_nome}",
             f"🗓️ **{self.dia}**"
@@ -622,7 +676,7 @@ class SemanalAnimeNavigator(discord.ui.View):
         embed.set_footer(text=f"Página {self.page + 1}/{len(lista)} • Use os controles abaixo")
         return embed
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    async def interaction_check(self, interaction):
         if interaction.user.id != self.autor_id:
             await interaction.response.send_message(
                 "Só quem usou o comando pode mexer nesses botões.",
