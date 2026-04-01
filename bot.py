@@ -22,7 +22,7 @@ ARQUIVO_AUTO = "auto_notificacao.json"
 
 COOLDOWN_SEGUNDOS = 5
 CACHE_SEGUNDOS = 120
-NOVO_LIMITE = 8
+NOVO_LIMITE = 20
 
 cooldowns = {}
 cache_memoria = {}
@@ -559,9 +559,10 @@ class AnimeNavigator(discord.ui.View):
 # UI / SEMANAL
 # =========================
 class SemanalNavigator(discord.ui.View):
-    def __init__(self, agenda, autor_id, temporada_nome, timeout=300):
+    def __init__(self, agenda, agenda_img, autor_id, temporada_nome, timeout=300):
         super().__init__(timeout=timeout)
         self.agenda = agenda
+        self.agenda_img = agenda_img
         self.autor_id = autor_id
         self.temporada_nome = temporada_nome
         self.dia_atual = "Segunda"
@@ -577,6 +578,7 @@ class SemanalNavigator(discord.ui.View):
 
     def criar_embed(self):
         itens = self.agenda.get(self.dia_atual, [])
+        imagem = self.agenda_img.get(self.dia_atual, "")
 
         embed = discord.Embed(
             title=f"📅 Calendário Semanal — {self.temporada_nome}",
@@ -591,12 +593,15 @@ class SemanalNavigator(discord.ui.View):
                 inline=False
             )
         else:
-            texto = "\n\n".join(itens[:12])
+            texto = "\n\n".join(itens[:10])
             embed.add_field(
                 name="Animes do dia",
                 value=texto[:1024],
                 inline=False
             )
+
+        if imagem:
+            embed.set_thumbnail(url=imagem)
 
         embed.set_footer(text="Escolha o dia nos botões abaixo")
         return embed
@@ -766,6 +771,16 @@ async def semanal(interaction: discord.Interaction):
             "Domingo": []
         }
 
+        agenda_img = {
+            "Segunda": "",
+            "Terça": "",
+            "Quarta": "",
+            "Quinta": "",
+            "Sexta": "",
+            "Sábado": "",
+            "Domingo": ""
+        }
+
         for anime in animes:
             prox = anime.get("nextAiringEpisode")
             if not prox or not prox.get("airingAt"):
@@ -787,14 +802,17 @@ async def semanal(interaction: discord.Interaction):
                 f"📺 Ep {episodio} às {horario}"
             )
 
-            agenda[dia].append((dt, linha))
+            agenda[dia].append((dt, linha, anime))
 
         for dia in agenda:
             agenda[dia].sort(key=lambda x: x[0])
+            if agenda[dia]:
+                agenda_img[dia] = pegar_imagem_correta(agenda[dia][0][2])
             agenda[dia] = [item[1] for item in agenda[dia]]
 
         view = SemanalNavigator(
             agenda=agenda,
+            agenda_img=agenda_img,
             autor_id=interaction.user.id,
             temporada_nome=nome_temporada_pt(temporada_atual())
         )
