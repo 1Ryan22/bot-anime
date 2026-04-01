@@ -45,11 +45,11 @@ tree = app_commands.CommandTree(client)
 # =========================
 # FUNÇÕES AUXILIARES
 # =========================
-def agora_br():
+def agora_local():
     return datetime.now().astimezone()
 
 def temporada_atual():
-    mes = agora_br().month
+    mes = agora_local().month
     if mes in [1, 2, 3]:
         return "WINTER"
     elif mes in [4, 5, 6]:
@@ -111,7 +111,7 @@ def traduzir_texto(texto):
             if parte[0]:
                 traducao += parte[0]
 
-        return traducao if traducao.strip() else texto
+        return traducao.strip() if traducao.strip() else texto
     except Exception:
         return texto
 
@@ -149,7 +149,7 @@ def anilist_query(query, variables=None):
 
     return data["data"]
 
-def formatar_timestamp_br(ts):
+def formatar_timestamp_local(ts):
     if not ts:
         return "Data não informada"
     dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
@@ -159,7 +159,7 @@ def mesmo_dia_local(ts):
     if not ts:
         return False
     dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone().date()
-    hoje = agora_br().date()
+    hoje = agora_local().date()
     return dt == hoje
 
 def criar_embed_anime(media, titulo_extra=None):
@@ -243,7 +243,7 @@ def query_temporada_atual():
     """
     variables = {
         "season": temporada_atual(),
-        "seasonYear": agora_br().year,
+        "seasonYear": agora_local().year,
         "page": 1,
         "perPage": 10
     }
@@ -332,7 +332,7 @@ def query_lancamentos_hoje():
     """
     variables = {
         "season": temporada_atual(),
-        "seasonYear": agora_br().year,
+        "seasonYear": agora_local().year,
         "page": 1,
         "perPage": 50
     }
@@ -371,7 +371,7 @@ def query_calendario_semanal():
     """
     variables = {
         "season": temporada_atual(),
-        "seasonYear": agora_br().year,
+        "seasonYear": agora_local().year,
         "page": 1,
         "perPage": 50
     }
@@ -401,7 +401,7 @@ async def animetemp(interaction: discord.Interaction):
     try:
         animes = query_temporada_atual()
         temp = temporada_atual()
-        ano = agora_br().year
+        ano = agora_local().year
 
         if not animes:
             await interaction.followup.send("Não encontrei animes da temporada atual.")
@@ -414,7 +414,7 @@ async def animetemp(interaction: discord.Interaction):
             prox = anime.get("nextAiringEpisode")
 
             if prox:
-                extra += f"\n📅 Próximo episódio: {prox.get('episode', '?')} em {formatar_timestamp_br(prox.get('airingAt'))}"
+                extra += f"\n📅 Próximo episódio: {prox.get('episode', '?')} em {formatar_timestamp_local(prox.get('airingAt'))}"
 
             await interaction.followup.send(embed=criar_embed_anime(anime, extra))
 
@@ -461,7 +461,7 @@ async def lancamento(interaction: discord.Interaction):
             extra = (
                 "📺 Lançamento de hoje\n"
                 f"🎞️ Episódio: {prox.get('episode', '?')}\n"
-                f"⏰ Horário: {formatar_timestamp_br(prox.get('airingAt'))}"
+                f"⏰ Horário: {formatar_timestamp_local(prox.get('airingAt'))}"
             )
             await interaction.followup.send(embed=criar_embed_anime(anime, extra))
 
@@ -494,7 +494,7 @@ async def semanal(interaction: discord.Interaction):
             agenda.setdefault(dia, []).append(linha)
 
         embed = discord.Embed(
-            title=f"📅 Calendário semanal — {nome_temporada_pt(temporada_atual())} {agora_br().year}",
+            title=f"📅 Calendário semanal — {nome_temporada_pt(temporada_atual())} {agora_local().year}",
             color=COR_EMBED
         )
 
@@ -543,7 +543,7 @@ async def verificar_notificacoes():
         if not dados["canais"]:
             return
 
-        data_hoje = agora_br().strftime("%Y-%m-%d")
+        data_hoje = agora_local().strftime("%Y-%m-%d")
         if data_hoje not in dados["avisados"]:
             dados["avisados"][data_hoje] = []
 
@@ -558,7 +558,7 @@ async def verificar_notificacoes():
             extra = (
                 "🔔 Lançamento de hoje\n"
                 f"🎞️ Episódio: {prox.get('episode', '?')}\n"
-                f"⏰ Horário: {formatar_timestamp_br(prox.get('airingAt'))}"
+                f"⏰ Horário: {formatar_timestamp_local(prox.get('airingAt'))}"
             )
             embed = criar_embed_anime(anime, extra)
 
@@ -577,9 +577,11 @@ async def verificar_notificacoes():
 # START
 # =========================
 if __name__ == "__main__":
+    print("Iniciando Flask...")
     keep_alive()
 
     if not DISCORD_TOKEN:
         raise ValueError("DISCORD_TOKEN não foi definido nas variáveis de ambiente.")
 
+    print("Iniciando bot do Discord...")
     client.run(DISCORD_TOKEN)
