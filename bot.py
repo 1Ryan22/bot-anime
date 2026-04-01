@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import math
 import asyncio
 import requests
 from datetime import datetime, timezone
@@ -20,13 +21,10 @@ JIKAN_URL = "https://api.jikan.moe/v4/anime"
 COR_EMBED = 0xFF8C00
 ARQUIVO_AUTO = "auto_notificacao.json"
 
-MAX_RESULTADOS = 5
 COOLDOWN_SEGUNDOS = 5
 CACHE_SEGUNDOS = 120
+ITENS_POR_PAGINA = 8
 
-# =========================
-# CONTROLE
-# =========================
 cooldowns = {}
 cache_memoria = {}
 
@@ -248,38 +246,76 @@ def pegar_imagem_correta(media):
         return img_jikan
     return imagem_anilist(media)
 
-def criar_embed_anime(media, titulo_extra=None):
+def formato_pt(media_format):
+    formatos = {
+        "TV": "TV",
+        "TV_SHORT": "TV Curto",
+        "MOVIE": "Filme",
+        "SPECIAL": "Especial",
+        "OVA": "OVA",
+        "ONA": "ONA",
+        "MUSIC": "Música"
+    }
+    return formatos.get(media_format, media_format or "N/A")
+
+def status_pt(status):
+    mapa = {
+        "FINISHED": "Finalizado",
+        "RELEASING": "Em lançamento",
+        "NOT_YET_RELEASED": "Não lançado",
+        "CANCELLED": "Cancelado",
+        "HIATUS": "Hiato"
+    }
+    return mapa.get(status, status or "N/A")
+
+def montar_linha_anime(media, tipo="geral"):
     titulo = melhor_titulo(media)
-    url = media.get("siteUrl", "")
-    imagem = pegar_imagem_correta(media)
+    link = media.get("siteUrl", "")
     nota = media.get("averageScore")
-    episodios = media.get("episodes")
-    sinopse = media.get("description") or "Sem sinopse disponível."
+    formato = formato_pt(media.get("format"))
+    status = status_pt(media.get("status"))
+    episodios = media.get("episodes") if media.get("episodes") is not None else "N/A"
 
-    sinopse = limpar_html(sinopse)
-    sinopse = traduzir_texto(sinopse)
+    base = f"**[{titulo}]({link})**\n🎞️ {formato} • ⭐ {nota if nota is not None else 'N/A'} • 📺 {episodios} eps • 📡 {status}"
 
-    if len(sinopse) > 450:
-        sinopse = sinopse[:450] + "..."
+    if tipo == "novo":
+        inicio = media.get("startDate", {})
+        data_inicio = f"{inicio.get('day') or '??'}/{inicio.get('month') or '??'}/{inicio.get('year') or '????'}"
+        base += f"\n🗓️ Estreia: {data_inicio}"
 
-    nota_texto = nota if nota is not None else "N/A"
-    episodios_texto = episodios if episodios is not None else "N/A"
+    if tipo == "lancamento":
+        prox = media.get("nextAiringEpisode", {})
+        base += f"\n⏰ Ep {prox.get('episode', '?')} em {formatar_timestamp_local(prox.get('airingAt'))}"
 
-    descricao = f"⭐ Nota: {nota_texto}\n🎬 Episódios: {episodios_texto}\n\n📖 {sinopse}"
+    if tipo == "temporada":
+        prox = media.get("nextAiringEpisode")
+        if prox:
+            base += f"\n📅 Próximo ep {prox.get('episode', '?')} em {formatar_timestamp_local(prox.get('airingAt'))}"
 
-    if titulo_extra:
-        descricao = f"{titulo_extra}\n\n{descricao}"
+    return base
 
+def criar_embed_pagina(titulo, descricao_topo, itens, pagina, total_paginas, tipo="geral"):
     embed = discord.Embed(
         title=titulo,
-        url=url,
-        description=descricao,
+        description=descricao_topo,
         color=COR_EMBED
     )
 
-    if imagem:
-        embed.set_image(url=imagem)
+    inicio = pagina * ITENS_POR_PAGINA
+    fim = inicio + ITENS_POR_PAGINA
+    bloco = itens[inicio:fim]
 
+    for i, item in enumerate(bloco, start=inicio + 1):
+        nome = f"{i}. {melhor_titulo(item)}"
+        valor = montar_linha_anime(item, tipo=tipo)
+        embed.add_field(name=nome[:256], value=valor[:1024], inline=False)
+
+    if itens:
+        imagem = pegar_imagem_correta(bloco[0])
+        if imagem:
+            embed.set_thumbnail(url=imagem)
+
+    embed.set_footer(text=f"Página {pagina + 1}/{total_paginas} • Total: {len(itens)}")
     return embed
 
 def cache_get(nome):
@@ -304,6 +340,17 @@ def em_cooldown(user_id, comando):
     cooldowns[chave] = agora
     return 0
 
+async def enviar_paginas(interaction, titulo, descricao, itens, tipo="geral"):
+    if not itens:
+        await interaction.followup.send("Nenhum resultado encontrado.")
+        return
+
+    total_paginas = math.ceil(len(itens) / ITENS_POR_PAGINA)
+
+    for pagina in range(total_paginas):
+        embed = criar_embed_pagina(titulo, descricao, itens, pagina, total_paginas, tipo=tipo)
+        await interaction.followup.send(embed=embed)
+
 # =========================
 # QUERIES ANILIST
 # =========================
@@ -318,39 +365,22 @@ def query_temporada_atual():
       Page(page: $page, perPage: $perPage) {
         media(
           type: ANIME,
-          format: TV,
           season: $season,
           seasonYear: $seasonYear,
-          status_in: [RELEASING, NOT_YET_RELEASED],
           isAdult: false,
           sort: POPULARITY_DESC
         ) {
           id
           siteUrl
-          title {
-            romaji
-            english
-            native
-          }
+          title { romaji english native }
           description(asHtml: false)
           episodes
           averageScore
           status
           format
-          coverImage {
-            extraLarge
-            large
-            medium
-          }
-          nextAiringEpisode {
-            episode
-            airingAt
-          }
-          startDate {
-            year
-            month
-            day
-          }
+          coverImage { extraLarge large medium }
+          nextAiringEpisode { episode airingAt }
+          startDate { year month day }
         }
       }
     }
@@ -359,7 +389,7 @@ def query_temporada_atual():
         "season": temporada_atual(),
         "seasonYear": agora_local().year,
         "page": 1,
-        "perPage": MAX_RESULTADOS
+        "perPage": 50
     }
     resultado = anilist_query(query, variables)["Page"]["media"]
     cache_set(cache_nome, resultado)
@@ -376,42 +406,26 @@ def query_novos_anunciados():
       Page(page: $page, perPage: $perPage) {
         media(
           type: ANIME,
-          format: TV,
           status: NOT_YET_RELEASED,
           isAdult: false,
           sort: POPULARITY_DESC
         ) {
           id
           siteUrl
-          title {
-            romaji
-            english
-            native
-          }
+          title { romaji english native }
           description(asHtml: false)
           episodes
           averageScore
           status
           format
-          coverImage {
-            extraLarge
-            large
-            medium
-          }
-          nextAiringEpisode {
-            episode
-            airingAt
-          }
-          startDate {
-            year
-            month
-            day
-          }
+          coverImage { extraLarge large medium }
+          nextAiringEpisode { episode airingAt }
+          startDate { year month day }
         }
       }
     }
     """
-    variables = {"page": 1, "perPage": MAX_RESULTADOS}
+    variables = {"page": 1, "perPage": 50}
     resultado = anilist_query(query, variables)["Page"]["media"]
     cache_set(cache_nome, resultado)
     return resultado
@@ -427,7 +441,6 @@ def query_lancamentos_hoje():
       Page(page: $page, perPage: $perPage) {
         media(
           type: ANIME,
-          format: TV,
           season: $season,
           seasonYear: $seasonYear,
           status: RELEASING,
@@ -436,30 +449,15 @@ def query_lancamentos_hoje():
         ) {
           id
           siteUrl
-          title {
-            romaji
-            english
-            native
-          }
+          title { romaji english native }
           description(asHtml: false)
           episodes
           averageScore
           status
           format
-          coverImage {
-            extraLarge
-            large
-            medium
-          }
-          nextAiringEpisode {
-            episode
-            airingAt
-          }
-          startDate {
-            year
-            month
-            day
-          }
+          coverImage { extraLarge large medium }
+          nextAiringEpisode { episode airingAt }
+          startDate { year month day }
         }
       }
     }
@@ -468,7 +466,7 @@ def query_lancamentos_hoje():
         "season": temporada_atual(),
         "seasonYear": agora_local().year,
         "page": 1,
-        "perPage": 30
+        "perPage": 100
     }
     medias = anilist_query(query, variables)["Page"]["media"]
 
@@ -491,7 +489,6 @@ def query_calendario_semanal():
       Page(page: $page, perPage: $perPage) {
         media(
           type: ANIME,
-          format: TV,
           season: $season,
           seasonYear: $seasonYear,
           status: RELEASING,
@@ -500,20 +497,13 @@ def query_calendario_semanal():
         ) {
           id
           siteUrl
-          title {
-            romaji
-            english
-            native
-          }
-          coverImage {
-            extraLarge
-            large
-            medium
-          }
-          nextAiringEpisode {
-            episode
-            airingAt
-          }
+          title { romaji english native }
+          coverImage { extraLarge large medium }
+          nextAiringEpisode { episode airingAt }
+          format
+          status
+          averageScore
+          episodes
         }
       }
     }
@@ -522,7 +512,7 @@ def query_calendario_semanal():
         "season": temporada_atual(),
         "seasonYear": agora_local().year,
         "page": 1,
-        "perPage": 30
+        "perPage": 100
     }
     resultado = anilist_query(query, variables)["Page"]["media"]
     cache_set(cache_nome, resultado)
@@ -570,21 +560,13 @@ async def animetemp(interaction: discord.Interaction):
         temp = temporada_atual()
         ano = agora_local().year
 
-        if not animes:
-            await interaction.followup.send("Não encontrei animes da temporada atual.")
-            return
-
-        await interaction.followup.send(f"🎌 **Temporada atual:** {nome_temporada_pt(temp)} {ano}")
-
-        for anime in animes:
-            extra = f"📢 Anime da temporada: {nome_temporada_pt(temp)} {ano}"
-            prox = anime.get("nextAiringEpisode")
-
-            if prox:
-                extra += f"\n📅 Próximo episódio: {prox.get('episode', '?')} em {formatar_timestamp_local(prox.get('airingAt'))}"
-
-            embed = await asyncio.to_thread(criar_embed_anime, anime, extra)
-            await interaction.followup.send(embed=embed)
+        await enviar_paginas(
+            interaction,
+            f"🎌 Temporada Atual — {nome_temporada_pt(temp)} {ano}",
+            "Lista organizada dos animes da temporada atual.",
+            animes,
+            tipo="temporada"
+        )
 
     except Exception as e:
         await interaction.followup.send(f"Erro ao buscar temporada: `{e}`")
@@ -604,23 +586,18 @@ async def novo(interaction: discord.Interaction):
     try:
         animes = await asyncio.to_thread(query_novos_anunciados)
 
-        if not animes:
-            await interaction.followup.send("Não encontrei novos animes anunciados.")
-            return
-
-        await interaction.followup.send("🆕 **Novos animes anunciados / próximos:**")
-
-        for anime in animes:
-            inicio = anime.get("startDate", {})
-            data_inicio = f"{inicio.get('day') or '??'}/{inicio.get('month') or '??'}/{inicio.get('year') or '????'}"
-            extra = f"🆕 Novo anime anunciado\n📅 Estreia prevista: {data_inicio}"
-            embed = await asyncio.to_thread(criar_embed_anime, anime, extra)
-            await interaction.followup.send(embed=embed)
+        await enviar_paginas(
+            interaction,
+            "🆕 Novos Animes Anunciados",
+            "Lista organizada dos próximos animes anunciados.",
+            animes,
+            tipo="novo"
+        )
 
     except Exception as e:
         await interaction.followup.send(f"Erro ao buscar novos animes: `{e}`")
 
-@tree.command(name="lancamento", description="Mostra animes que lançam hoje")
+@tree.command(name="lancamento", description="Mostra tudo que lança hoje")
 async def lancamento(interaction: discord.Interaction):
     espera = em_cooldown(interaction.user.id, "lancamento")
     if espera > 0:
@@ -635,21 +612,13 @@ async def lancamento(interaction: discord.Interaction):
     try:
         animes = await asyncio.to_thread(query_lancamentos_hoje)
 
-        if not animes:
-            await interaction.followup.send("Hoje não encontrei lançamentos.")
-            return
-
-        await interaction.followup.send("📺 **Animes com lançamento hoje:**")
-
-        for anime in animes[:MAX_RESULTADOS]:
-            prox = anime.get("nextAiringEpisode", {})
-            extra = (
-                "📺 Lançamento de hoje\n"
-                f"🎞️ Episódio: {prox.get('episode', '?')}\n"
-                f"⏰ Horário: {formatar_timestamp_local(prox.get('airingAt'))}"
-            )
-            embed = await asyncio.to_thread(criar_embed_anime, anime, extra)
-            await interaction.followup.send(embed=embed)
+        await enviar_paginas(
+            interaction,
+            "📺 Lançamentos de Hoje",
+            "Todos os animes encontrados com lançamento hoje.",
+            animes,
+            tipo="lancamento"
+        )
 
     except Exception as e:
         await interaction.followup.send(f"Erro ao buscar lançamentos: `{e}`")
@@ -685,15 +654,15 @@ async def semanal(interaction: discord.Interaction):
 
             airing_at = prox.get("airingAt")
             episodio = prox.get("episode")
-
             if not airing_at:
                 continue
 
             dt = datetime.fromtimestamp(airing_at, tz=timezone.utc).astimezone()
             dia = nome_dia_pt(dt)
             titulo = melhor_titulo(anime)
+            formato = formato_pt(anime.get("format"))
 
-            linha = f"**{titulo}** — Ep {episodio or '?'} às {dt.strftime('%H:%M')}"
+            linha = f"**{titulo}** — {formato} • Ep {episodio or '?'} às {dt.strftime('%H:%M')}"
             if dia in agenda:
                 agenda[dia].append((dt, linha))
 
@@ -701,13 +670,14 @@ async def semanal(interaction: discord.Interaction):
             agenda[dia].sort(key=lambda x: x[0])
 
         embed = discord.Embed(
-            title=f"📅 Calendário semanal — {nome_temporada_pt(temporada_atual())} {agora_local().year}",
+            title=f"📅 Calendário Semanal — {nome_temporada_pt(temporada_atual())} {agora_local().year}",
+            description="Agenda organizada por dia da semana.",
             color=COR_EMBED
         )
 
         for dia in ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]:
             itens = agenda[dia]
-            texto = "\n".join([item[1] for item in itens[:8]]) if itens else "Nenhum anime encontrado."
+            texto = "\n".join([item[1] for item in itens[:20]]) if itens else "Nenhum anime encontrado."
             embed.add_field(name=dia, value=texto[:1024], inline=False)
 
         await interaction.followup.send(embed=embed)
