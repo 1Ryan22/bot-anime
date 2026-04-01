@@ -171,7 +171,13 @@ def criar_embed_anime(media, titulo_extra=None):
     )
 
     url = media.get("siteUrl", "")
-    imagem = media.get("bannerImage") or media.get("coverImage", {}).get("large", "")
+    imagem = (
+        media.get("coverImage", {}).get("extraLarge")
+        or media.get("coverImage", {}).get("large")
+        or media.get("coverImage", {}).get("medium")
+        or ""
+    )
+
     nota = media.get("averageScore")
     episodios = media.get("episodes")
     sinopse = media.get("description") or "Sem sinopse disponível."
@@ -214,7 +220,6 @@ def query_temporada_atual():
         ) {
           id
           siteUrl
-          bannerImage
           title {
             romaji
             english
@@ -226,7 +231,9 @@ def query_temporada_atual():
           status
           format
           coverImage {
+            extraLarge
             large
+            medium
           }
           nextAiringEpisode {
             episode
@@ -260,7 +267,6 @@ def query_novos_anunciados():
         ) {
           id
           siteUrl
-          bannerImage
           title {
             romaji
             english
@@ -272,7 +278,9 @@ def query_novos_anunciados():
           status
           format
           coverImage {
+            extraLarge
             large
+            medium
           }
           nextAiringEpisode {
             episode
@@ -303,7 +311,6 @@ def query_lancamentos_hoje():
         ) {
           id
           siteUrl
-          bannerImage
           title {
             romaji
             english
@@ -315,7 +322,9 @@ def query_lancamentos_hoje():
           status
           format
           coverImage {
+            extraLarge
             large
+            medium
           }
           nextAiringEpisode {
             episode
@@ -360,6 +369,11 @@ def query_calendario_semanal():
             romaji
             english
             native
+          }
+          coverImage {
+            extraLarge
+            large
+            medium
           }
           nextAiringEpisode {
             episode
