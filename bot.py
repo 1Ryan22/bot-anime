@@ -3,6 +3,7 @@ import json
 import time
 import asyncio
 import requests
+import aiohttp
 from datetime import datetime, timezone
 from flask import Flask
 from threading import Thread
@@ -22,6 +23,7 @@ ARQUIVO_AUTO = "auto_notificacao.json"
 
 COOLDOWN_SEGUNDOS = 5
 CACHE_SEGUNDOS = 120
+LOOP_MINUTOS = 2
 
 cooldowns = {}
 cache_memoria = {}
@@ -150,38 +152,6 @@ def limpar_html(texto):
 
     return texto.strip()
 
-def traduzir_texto(texto):
-    if not texto:
-        return "Sem sinopse disponível."
-
-    cache_key = f"trad:{texto[:200]}"
-    agora = time.time()
-
-    if cache_key in cache_memoria:
-        salvo_em, valor = cache_memoria[cache_key]
-        if agora - salvo_em < 3600:
-            return valor
-
-    try:
-        r = requests.get(
-            "https://translate.googleapis.com/translate_a/single",
-            params={
-                "client": "gtx",
-                "sl": "auto",
-                "tl": "pt",
-                "dt": "t",
-                "q": texto
-            },
-            timeout=15
-        )
-        r.raise_for_status()
-        traducao = "".join([x[0] for x in r.json()[0] if x[0]])
-        traducao = traducao.strip() if traducao.strip() else texto
-        cache_memoria[cache_key] = (agora, traducao)
-        return traducao
-    except Exception:
-        return texto
-
 def formatar_timestamp_local(ts):
     if not ts:
         return "Data não informada"
@@ -216,56 +186,6 @@ def imagem_anilist(media):
         or ""
     )
 
-def buscar_imagem_jikan(nome):
-    cache_key = f"imgj:{nome.lower()}"
-    agora = time.time()
-
-    if cache_key in cache_memoria:
-        salvo_em, valor = cache_memoria[cache_key]
-        if agora - salvo_em < 3600:
-            return valor
-
-    try:
-        resposta = requests.get(
-            JIKAN_URL,
-            params={"q": nome, "limit": 3},
-            timeout=15
-        )
-        resposta.raise_for_status()
-        dados = resposta.json().get("data", [])
-
-        if not dados:
-            cache_memoria[cache_key] = (agora, "")
-            return ""
-
-        for item in dados:
-            if item.get("type") == "TV":
-                img = (
-                    item.get("images", {}).get("jpg", {}).get("large_image_url")
-                    or item.get("images", {}).get("jpg", {}).get("image_url")
-                    or ""
-                )
-                cache_memoria[cache_key] = (agora, img)
-                return img
-
-        primeiro = dados[0]
-        img = (
-            primeiro.get("images", {}).get("jpg", {}).get("large_image_url")
-            or primeiro.get("images", {}).get("jpg", {}).get("image_url")
-            or ""
-        )
-        cache_memoria[cache_key] = (agora, img)
-        return img
-    except Exception:
-        return ""
-
-def pegar_imagem_correta(media):
-    titulo = melhor_titulo(media)
-    img_jikan = buscar_imagem_jikan(titulo)
-    if img_jikan:
-        return img_jikan
-    return imagem_anilist(media)
-
 def cache_get(nome):
     agora = time.time()
     if nome in cache_memoria:
@@ -299,12 +219,99 @@ def salvar_auto(dados):
         json.dump(dados, f, ensure_ascii=False, indent=2)
 
 # =========================
+# FUNÇÕES ASYNC (IMAGEM / TRADUÇÃO)
+# =========================
+async def traduzir_texto_async(session, texto):
+    if not texto:
+        return "Sem sinopse disponível."
+
+    cache_key = f"trad:{texto[:200]}"
+    agora = time.time()
+
+    if cache_key in cache_memoria:
+        salvo_em, valor = cache_memoria[cache_key]
+        if agora - salvo_em < 3600:
+            return valor
+
+    try:
+        async with session.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={
+                "client": "gtx",
+                "sl": "auto",
+                "tl": "pt",
+                "dt": "t",
+                "q": texto
+            },
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as r:
+            r.raise_for_status()
+            data = await r.json()
+            traducao = "".join([x[0] for x in data[0] if x[0]])
+            traducao = traducao.strip() if traducao.strip() else texto
+            cache_memoria[cache_key] = (agora, traducao)
+            return traducao
+    except Exception:
+        return texto
+
+async def buscar_imagem_jikan_async(session, nome):
+    cache_key = f"imgj:{nome.lower()}"
+    agora = time.time()
+
+    if cache_key in cache_memoria:
+        salvo_em, valor = cache_memoria[cache_key]
+        if agora - salvo_em < 3600:
+            return valor
+
+    try:
+        async with session.get(
+            JIKAN_URL,
+            params={"q": nome, "limit": 3},
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as resposta:
+            resposta.raise_for_status()
+            dados = (await resposta.json()).get("data", [])
+
+            if not dados:
+                cache_memoria[cache_key] = (agora, "")
+                return ""
+
+            for item in dados:
+                if item.get("type") == "TV":
+                    img = (
+                        item.get("images", {}).get("jpg", {}).get("large_image_url")
+                        or item.get("images", {}).get("jpg", {}).get("image_url")
+                        or ""
+                    )
+                    cache_memoria[cache_key] = (agora, img)
+                    return img
+
+            primeiro = dados[0]
+            img = (
+                primeiro.get("images", {}).get("jpg", {}).get("large_image_url")
+                or primeiro.get("images", {}).get("jpg", {}).get("image_url")
+                or ""
+            )
+            cache_memoria[cache_key] = (agora, img)
+            return img
+
+    except Exception:
+        return ""
+
+async def pegar_imagem_correta_async(session, media):
+    titulo = melhor_titulo(media)
+    img_jikan = await buscar_imagem_jikan_async(session, titulo)
+    if img_jikan:
+        return img_jikan
+    return imagem_anilist(media)
+
+# =========================
 # EMBEDS
 # =========================
 def criar_embed_info(anime, titulo_embed, subtitulo):
     titulo = melhor_titulo(anime)
     link = anime.get("siteUrl", "")
-    imagem = pegar_imagem_correta(anime)
+    imagem = imagem_anilist(anime)
     nota = anime.get("averageScore")
     episodios = anime.get("episodes")
     formato = formato_pt(anime.get("format"))
@@ -318,7 +325,6 @@ def criar_embed_info(anime, titulo_embed, subtitulo):
 
     sinopse = anime.get("description") or "Sem sinopse disponível."
     sinopse = limpar_html(sinopse)
-    sinopse = traduzir_texto(sinopse)
     if len(sinopse) > 350:
         sinopse = sinopse[:350] + "..."
 
@@ -369,7 +375,6 @@ def criar_embed_info_semanal(anime, titulo_embed, subtitulo):
 
     sinopse = anime.get("description") or "Sem sinopse disponível."
     sinopse = limpar_html(sinopse)
-    sinopse = traduzir_texto(sinopse)
     if len(sinopse) > 350:
         sinopse = sinopse[:350] + "..."
 
@@ -715,6 +720,87 @@ class SemanalAnimeNavigator(discord.ui.View):
             pass
 
 # =========================
+# PROCESSAMENTO DE NOTIFICAÇÕES
+# =========================
+async def montar_embed_lancamento(session, anime):
+    prox = anime.get("nextAiringEpisode")
+    anime_id = anime.get("id")
+
+    if not prox or not anime_id:
+        return None
+
+    if not mesmo_dia_local(prox.get("airingAt")):
+        return None
+
+    titulo = melhor_titulo(anime)
+    imagem = await pegar_imagem_correta_async(session, anime)
+
+    sinopse = anime.get("description") or "Sem sinopse disponível."
+    sinopse = limpar_html(sinopse)
+    sinopse = await traduzir_texto_async(session, sinopse)
+    if len(sinopse) > 220:
+        sinopse = sinopse[:220] + "..."
+
+    embed = discord.Embed(
+        title=f"🔔 {titulo}",
+        url=anime.get("siteUrl", ""),
+        description="**Novo episódio lançado hoje**",
+        color=COR_EMBED
+    )
+
+    embed.add_field(
+        name="📺 Episódio",
+        value=str(prox.get("episode", "?")),
+        inline=True
+    )
+    embed.add_field(
+        name="🎞️ Formato",
+        value=formato_pt(anime.get("format")),
+        inline=True
+    )
+    embed.add_field(
+        name="⏰ Horário",
+        value=formatar_timestamp_local(prox.get("airingAt")),
+        inline=True
+    )
+
+    embed.add_field(
+        name="📖 Sinopse",
+        value=sinopse,
+        inline=False
+    )
+
+    if imagem:
+        embed.set_thumbnail(url=imagem)
+
+    embed.set_footer(text="Notificação automática de lançamento")
+    return anime_id, embed
+
+async def coletar_embeds_animes_hoje(animes, ignorar_ids=None):
+    ignorar_ids = set(ignorar_ids or [])
+
+    connector = aiohttp.TCPConnector(limit=20)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tarefas = [
+            montar_embed_lancamento(session, anime)
+            for anime in animes
+            if anime.get("id") not in ignorar_ids
+        ]
+
+        resultados = await asyncio.gather(*tarefas, return_exceptions=True)
+
+    saida = []
+    for r in resultados:
+        if not r:
+            continue
+        if isinstance(r, Exception):
+            print("Erro ao montar embed:", r)
+            continue
+        saida.append(r)
+
+    return saida
+
+# =========================
 # COMANDOS
 # =========================
 @tree.command(name="ping", description="Mostra se o bot está online")
@@ -829,6 +915,34 @@ async def semanal(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"Erro: {e}")
 
+@tree.command(name="animeshoje", description="Envia no canal os animes que lançam hoje")
+async def animeshoje(interaction: discord.Interaction):
+    espera = em_cooldown(interaction.user.id, "animeshoje")
+    if espera > 0:
+        await interaction.response.send_message(
+            f"⏳ Espera {espera}s antes de usar /animeshoje de novo.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
+
+    try:
+        animes = await asyncio.to_thread(query_calendario_semanal)
+        resultados = await coletar_embeds_animes_hoje(animes)
+
+        if not resultados:
+            await interaction.followup.send("Hoje não encontrei animes com episódio novo.")
+            return
+
+        await interaction.followup.send(f"✅ Enviando {len(resultados)} anime(s) de hoje...")
+
+        for _, embed in resultados:
+            await interaction.channel.send(embed=embed)
+
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao carregar /animeshoje: `{e}`")
+
 @tree.command(name="autonotify", description="Liga ou desliga notificações automáticas neste canal")
 @app_commands.describe(acao="Escolha ligar ou desligar")
 @app_commands.choices(acao=[
@@ -861,7 +975,7 @@ async def autonotify(interaction: discord.Interaction, acao: app_commands.Choice
 # =========================
 # LOOP AUTOMÁTICO
 # =========================
-@tasks.loop(minutes=10)
+@tasks.loop(minutes=LOOP_MINUTOS)
 async def verificar_notificacoes():
     await client.wait_until_ready()
 
@@ -874,71 +988,27 @@ async def verificar_notificacoes():
         if data_hoje not in dados["avisados"]:
             dados["avisados"][data_hoje] = []
 
+        ids_ignorados = set(dados["avisados"][data_hoje])
+
         animes = await asyncio.to_thread(query_calendario_semanal)
+        resultados = await coletar_embeds_animes_hoje(animes, ignorar_ids=ids_ignorados)
 
-        for anime in animes:
-            prox = anime.get("nextAiringEpisode")
-            anime_id = anime.get("id")
+        if not resultados:
+            return
 
-            if not prox or not anime_id:
-                continue
-
-            if not mesmo_dia_local(prox.get("airingAt")):
-                continue
-
-            if anime_id in dados["avisados"][data_hoje]:
-                continue
-
-            titulo = melhor_titulo(anime)
-            imagem = pegar_imagem_correta(anime)
-
-            sinopse = anime.get("description") or "Sem sinopse disponível."
-            sinopse = limpar_html(sinopse)
-            sinopse = traduzir_texto(sinopse)
-            if len(sinopse) > 220:
-                sinopse = sinopse[:220] + "..."
-
-            embed = discord.Embed(
-                title=f"🔔 {titulo}",
-                url=anime.get("siteUrl", ""),
-                description="**Novo episódio lançado hoje**",
-                color=COR_EMBED
-            )
-
-            embed.add_field(
-                name="📺 Episódio",
-                value=str(prox.get("episode", "?")),
-                inline=True
-            )
-            embed.add_field(
-                name="🎞️ Formato",
-                value=formato_pt(anime.get("format")),
-                inline=True
-            )
-            embed.add_field(
-                name="⏰ Horário",
-                value=formatar_timestamp_local(prox.get("airingAt")),
-                inline=True
-            )
-
-            embed.add_field(
-                name="📖 Sinopse",
-                value=sinopse,
-                inline=False
-            )
-
-            if imagem:
-                embed.set_thumbnail(url=imagem)
-
-            embed.set_footer(text="Notificação automática de lançamento")
-
+        for anime_id, embed in resultados:
             for canal_id in dados["canais"]:
                 canal = client.get_channel(canal_id)
                 if canal:
-                    await canal.send(embed=embed)
+                    try:
+                        await canal.send(embed=embed)
+                    except Exception as e:
+                        print(f"Erro ao enviar no canal {canal_id}: {e}")
 
-            dados["avisados"][data_hoje].append(anime_id)
-            salvar_auto(dados)
+            if anime_id not in dados["avisados"][data_hoje]:
+                dados["avisados"][data_hoje].append(anime_id)
+
+        salvar_auto(dados)
 
     except Exception as e:
         print("Erro na notificação automática:", e)
