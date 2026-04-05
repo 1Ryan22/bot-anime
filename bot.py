@@ -974,10 +974,7 @@ async def resetnotify(interaction: discord.Interaction):
 
     dados = carregar_auto()
     data_hoje = agora_local().strftime("%Y-%m-%d")
-
-    if data_hoje in dados["avisados"]:
-        dados["avisados"][data_hoje] = []
-
+    dados["avisados"][data_hoje] = []
     salvar_auto(dados)
 
     await interaction.response.send_message(
@@ -1039,7 +1036,11 @@ async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
         synced = await tree.sync(guild=guild)
+
         print(f"Sincronizados {len(synced)} comandos na guild {GUILD_ID}")
+        print("Comandos sincronizados:")
+        for cmd in synced:
+            print(f"- {cmd.name}")
     except Exception as e:
         print(f"Erro ao sincronizar comandos: {e}")
 
