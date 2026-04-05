@@ -26,10 +26,7 @@ COOLDOWN_SEGUNDOS = 5
 CACHE_SEGUNDOS = 120
 LOOP_MINUTOS = 2
 
-# COLOCA O ID DO TEU SERVIDOR
 GUILD_ID = 1484692136749437162
-
-# FUSO FIXO DO BRASIL
 FUSO_BR = ZoneInfo("America/Sao_Paulo")
 
 cooldowns = {}
@@ -1035,6 +1032,12 @@ async def verificar_notificacoes():
 async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
+
+        # limpa os comandos antigos da guild
+        tree.clear_commands(guild=guild)
+        await tree.sync(guild=guild)
+
+        # registra de novo os comandos atuais
         synced = await tree.sync(guild=guild)
 
         print(f"Sincronizados {len(synced)} comandos na guild {GUILD_ID}")
