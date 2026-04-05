@@ -26,7 +26,10 @@ COOLDOWN_SEGUNDOS = 5
 CACHE_SEGUNDOS = 120
 LOOP_MINUTOS = 2
 
+# COLOCA O ID DO TEU SERVIDOR
 GUILD_ID = 1484692136749437162
+
+# FUSO FIXO DO BRASIL
 FUSO_BR = ZoneInfo("America/Sao_Paulo")
 
 cooldowns = {}
@@ -930,11 +933,12 @@ async def semanal(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"Erro: {e}")
 
-@tree.command(name="autonotify", description="Liga ou desliga notificações automáticas neste canal")
-@app_commands.describe(acao="Escolha ligar ou desligar")
+@tree.command(name="autonotify", description="Configura notificações automáticas")
+@app_commands.describe(acao="Escolha ligar, desligar ou resetar")
 @app_commands.choices(acao=[
     app_commands.Choice(name="ligar", value="ligar"),
-    app_commands.Choice(name="desligar", value="desligar")
+    app_commands.Choice(name="desligar", value="desligar"),
+    app_commands.Choice(name="resetar", value="resetar")
 ])
 async def autonotify(interaction: discord.Interaction, acao: app_commands.Choice[str]):
     espera = em_cooldown(interaction.user.id, "autonotify")
@@ -947,37 +951,27 @@ async def autonotify(interaction: discord.Interaction, acao: app_commands.Choice
 
     dados = carregar_auto()
     canal_id = interaction.channel_id
+    data_hoje = agora_local().strftime("%Y-%m-%d")
 
     if acao.value == "ligar":
         if canal_id not in dados["canais"]:
             dados["canais"].append(canal_id)
-            salvar_auto(dados)
+        salvar_auto(dados)
         await interaction.response.send_message("✅ Notificação automática ligada neste canal.")
-    else:
+
+    elif acao.value == "desligar":
         if canal_id in dados["canais"]:
             dados["canais"].remove(canal_id)
-            salvar_auto(dados)
+        salvar_auto(dados)
         await interaction.response.send_message("🛑 Notificação automática desligada neste canal.")
 
-@tree.command(name="resetnotify", description="Reseta as notificações de hoje (permite reenviar os animes)")
-async def resetnotify(interaction: discord.Interaction):
-    espera = em_cooldown(interaction.user.id, "resetnotify")
-    if espera > 0:
+    elif acao.value == "resetar":
+        dados["avisados"][data_hoje] = []
+        salvar_auto(dados)
         await interaction.response.send_message(
-            f"⏳ Espera {espera}s antes de usar /resetnotify de novo.",
+            "♻️ Notificações de hoje resetadas! O bot pode enviar tudo novamente.",
             ephemeral=True
         )
-        return
-
-    dados = carregar_auto()
-    data_hoje = agora_local().strftime("%Y-%m-%d")
-    dados["avisados"][data_hoje] = []
-    salvar_auto(dados)
-
-    await interaction.response.send_message(
-        "♻️ Notificações de hoje resetadas! O bot pode enviar tudo novamente.",
-        ephemeral=True
-    )
 
 # =========================
 # LOOP AUTOMÁTICO
@@ -1033,11 +1027,10 @@ async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
 
-        # limpa os comandos antigos da guild
+        # limpeza temporária de comandos antigos bugados
         tree.clear_commands(guild=guild)
         await tree.sync(guild=guild)
 
-        # registra de novo os comandos atuais
         synced = await tree.sync(guild=guild)
 
         print(f"Sincronizados {len(synced)} comandos na guild {GUILD_ID}")
