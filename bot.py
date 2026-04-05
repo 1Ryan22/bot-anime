@@ -962,6 +962,29 @@ async def autonotify(interaction: discord.Interaction, acao: app_commands.Choice
             salvar_auto(dados)
         await interaction.response.send_message("🛑 Notificação automática desligada neste canal.")
 
+@tree.command(name="resetnotify", description="Reseta as notificações de hoje (permite reenviar os animes)")
+async def resetnotify(interaction: discord.Interaction):
+    espera = em_cooldown(interaction.user.id, "resetnotify")
+    if espera > 0:
+        await interaction.response.send_message(
+            f"⏳ Espera {espera}s antes de usar /resetnotify de novo.",
+            ephemeral=True
+        )
+        return
+
+    dados = carregar_auto()
+    data_hoje = agora_local().strftime("%Y-%m-%d")
+
+    if data_hoje in dados["avisados"]:
+        dados["avisados"][data_hoje] = []
+
+    salvar_auto(dados)
+
+    await interaction.response.send_message(
+        "♻️ Notificações de hoje resetadas! O bot pode enviar tudo novamente.",
+        ephemeral=True
+    )
+
 # =========================
 # LOOP AUTOMÁTICO
 # =========================
