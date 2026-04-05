@@ -5,6 +5,7 @@ import asyncio
 import requests
 import aiohttp
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from flask import Flask
 from threading import Thread
 
@@ -25,8 +26,11 @@ COOLDOWN_SEGUNDOS = 5
 CACHE_SEGUNDOS = 120
 LOOP_MINUTOS = 2
 
-# TROCA PELO ID DO TEU SERVIDOR
+# COLOCA O ID DO TEU SERVIDOR
 GUILD_ID = 1484692136749437162
+
+# FUSO FIXO DO BRASIL
+FUSO_BR = ZoneInfo("America/Sao_Paulo")
 
 cooldowns = {}
 cache_memoria = {}
@@ -59,7 +63,7 @@ tree = app_commands.CommandTree(client)
 # FUNÇÕES AUXILIARES
 # =========================
 def agora_local():
-    return datetime.now().astimezone()
+    return datetime.now(FUSO_BR)
 
 def temporada_atual():
     mes = agora_local().month
@@ -158,28 +162,8 @@ def limpar_html(texto):
 def formatar_timestamp_local(ts):
     if not ts:
         return "Data não informada"
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(FUSO_BR)
     return dt.strftime("%d/%m/%Y %H:%M")
-
-def mesmo_dia_local(ts):
-    if not ts:
-        return False
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone().date()
-    return dt == agora_local().date()
-
-def anilist_query(query, variables=None):
-    resposta = requests.post(
-        ANILIST_URL,
-        json={"query": query, "variables": variables or {}},
-        timeout=20
-    )
-    resposta.raise_for_status()
-    data = resposta.json()
-
-    if "errors" in data:
-        raise Exception(str(data["errors"]))
-
-    return data["data"]
 
 def imagem_anilist(media):
     return (
@@ -220,6 +204,20 @@ def carregar_auto():
 def salvar_auto(dados):
     with open(ARQUIVO_AUTO, "w", encoding="utf-8") as f:
         json.dump(dados, f, ensure_ascii=False, indent=2)
+
+def anilist_query(query, variables=None):
+    resposta = requests.post(
+        ANILIST_URL,
+        json={"query": query, "variables": variables or {}},
+        timeout=20
+    )
+    resposta.raise_for_status()
+    data = resposta.json()
+
+    if "errors" in data:
+        raise Exception(str(data["errors"]))
+
+    return data["data"]
 
 # =========================
 # FUNÇÕES ASYNC (IMAGEM / TRADUÇÃO)
@@ -723,16 +721,13 @@ class SemanalAnimeNavigator(discord.ui.View):
             pass
 
 # =========================
-# PROCESSAMENTO DE NOTIFICAÇÕES
+# AUTO NOTIFY
 # =========================
-async def montar_embed_lancamento(session, anime):
+async def montar_embed_autonotify(session, anime, dia_hoje):
     prox = anime.get("nextAiringEpisode")
     anime_id = anime.get("id")
 
-    if not prox or not anime_id:
-        return None
-
-    if not mesmo_dia_local(prox.get("airingAt")):
+    if not prox or not prox.get("airingAt") or not anime_id:
         return None
 
     titulo = melhor_titulo(anime)
@@ -747,7 +742,7 @@ async def montar_embed_lancamento(session, anime):
     embed = discord.Embed(
         title=f"🔔 {titulo}",
         url=anime.get("siteUrl", ""),
-        description="**Novo episódio lançado hoje**",
+        description=f"**Anime do calendário de {dia_hoje}**",
         color=COR_EMBED
     )
 
@@ -776,20 +771,40 @@ async def montar_embed_lancamento(session, anime):
     if imagem:
         embed.set_thumbnail(url=imagem)
 
-    embed.set_footer(text="Notificação automática de lançamento")
+    embed.set_footer(text="Notificação automática do calendário")
     return anime_id, embed
 
-async def coletar_embeds_animes_hoje(animes, ignorar_ids=None):
+async def coletar_embeds_autonotify(animes, dia_hoje, ignorar_ids=None):
     ignorar_ids = set(ignorar_ids or [])
+    lista_hoje = []
+
+    for anime in animes:
+        prox = anime.get("nextAiringEpisode")
+        anime_id = anime.get("id")
+
+        if not prox or not prox.get("airingAt") or not anime_id:
+            continue
+
+        dt = datetime.fromtimestamp(prox["airingAt"], tz=timezone.utc).astimezone(FUSO_BR)
+        dia_anime = nome_dia_pt(dt)
+
+        if dia_anime != dia_hoje:
+            continue
+
+        if anime_id in ignorar_ids:
+            continue
+
+        lista_hoje.append(anime)
+
+    if not lista_hoje:
+        return []
 
     connector = aiohttp.TCPConnector(limit=20)
     async with aiohttp.ClientSession(connector=connector) as session:
         tarefas = [
-            montar_embed_lancamento(session, anime)
-            for anime in animes
-            if anime.get("id") not in ignorar_ids
+            montar_embed_autonotify(session, anime, dia_hoje)
+            for anime in lista_hoje
         ]
-
         resultados = await asyncio.gather(*tarefas, return_exceptions=True)
 
     saida = []
@@ -898,7 +913,7 @@ async def semanal(interaction: discord.Interaction):
             if not prox or not prox.get("airingAt"):
                 continue
 
-            dt = datetime.fromtimestamp(prox["airingAt"], tz=timezone.utc).astimezone()
+            dt = datetime.fromtimestamp(prox["airingAt"], tz=timezone.utc).astimezone(FUSO_BR)
             dia = nome_dia_pt(dt)
             agenda[dia].append(anime)
 
@@ -917,34 +932,6 @@ async def semanal(interaction: discord.Interaction):
 
     except Exception as e:
         await interaction.followup.send(f"Erro: {e}")
-
-@tree.command(name="animeshoje", description="Envia no canal os animes que lançam hoje")
-async def animeshoje(interaction: discord.Interaction):
-    espera = em_cooldown(interaction.user.id, "animeshoje")
-    if espera > 0:
-        await interaction.response.send_message(
-            f"⏳ Espera {espera}s antes de usar /animeshoje de novo.",
-            ephemeral=True
-        )
-        return
-
-    await interaction.response.defer(thinking=True)
-
-    try:
-        animes = await asyncio.to_thread(query_calendario_semanal)
-        resultados = await coletar_embeds_animes_hoje(animes)
-
-        if not resultados:
-            await interaction.followup.send("Hoje não encontrei animes com episódio novo.")
-            return
-
-        await interaction.followup.send(f"✅ Enviando {len(resultados)} anime(s) de hoje...")
-
-        for _, embed in resultados:
-            await interaction.channel.send(embed=embed)
-
-    except Exception as e:
-        await interaction.followup.send(f"Erro ao carregar /animeshoje: `{e}`")
 
 @tree.command(name="autonotify", description="Liga ou desliga notificações automáticas neste canal")
 @app_commands.describe(acao="Escolha ligar ou desligar")
@@ -992,9 +979,14 @@ async def verificar_notificacoes():
             dados["avisados"][data_hoje] = []
 
         ids_ignorados = set(dados["avisados"][data_hoje])
+        dia_hoje = nome_dia_pt(agora_local())
 
         animes = await asyncio.to_thread(query_calendario_semanal)
-        resultados = await coletar_embeds_animes_hoje(animes, ignorar_ids=ids_ignorados)
+        resultados = await coletar_embeds_autonotify(
+            animes=animes,
+            dia_hoje=dia_hoje,
+            ignorar_ids=ids_ignorados
+        )
 
         if not resultados:
             return
@@ -1023,9 +1015,7 @@ async def verificar_notificacoes():
 async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
-
         synced = await tree.sync(guild=guild)
-
         print(f"Sincronizados {len(synced)} comandos na guild {GUILD_ID}")
     except Exception as e:
         print(f"Erro ao sincronizar comandos: {e}")
