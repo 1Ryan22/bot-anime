@@ -25,6 +25,9 @@ COOLDOWN_SEGUNDOS = 5
 CACHE_SEGUNDOS = 120
 LOOP_MINUTOS = 2
 
+# TROCA PELO ID DO TEU SERVIDOR
+GUILD_ID = 123456789012345678
+
 cooldowns = {}
 cache_memoria = {}
 
@@ -1018,9 +1021,19 @@ async def verificar_notificacoes():
 # =========================
 @client.event
 async def on_ready():
-    await tree.sync()
+    try:
+        guild = discord.Object(id=GUILD_ID)
+
+        tree.copy_global_to(guild=guild)
+        synced = await tree.sync(guild=guild)
+
+        print(f"Sincronizados {len(synced)} comandos na guild {GUILD_ID}")
+    except Exception as e:
+        print(f"Erro ao sincronizar comandos: {e}")
+
     if not verificar_notificacoes.is_running():
         verificar_notificacoes.start()
+
     print(f"Bot conectado como {client.user}")
 
 if __name__ == "__main__":
