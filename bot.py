@@ -1024,7 +1024,6 @@ async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
 
-        tree.copy_global_to(guild=guild)
         synced = await tree.sync(guild=guild)
 
         print(f"Sincronizados {len(synced)} comandos na guild {GUILD_ID}")
