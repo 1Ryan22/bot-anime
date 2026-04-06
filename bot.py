@@ -254,13 +254,25 @@ async def traduzir_texto_async(session, texto):
             },
             timeout=aiohttp.ClientTimeout(total=15)
         ) as r:
-            r.raise_for_status()
+            content_type = r.headers.get("Content-Type", "")
+
+            if r.status != 200:
+                print(f"Erro tradução HTTP {r.status}")
+                return texto
+
+            if "application/json" not in content_type:
+                resposta_texto = await r.text()
+                print("Tradução retornou algo que não é JSON:", resposta_texto[:300])
+                return texto
+
             data = await r.json()
             traducao = "".join([x[0] for x in data[0] if x[0]])
             traducao = traducao.strip() if traducao.strip() else texto
             cache_memoria[cache_key] = (agora, traducao)
             return traducao
-    except Exception:
+
+    except Exception as e:
+        print("Erro ao traduzir:", e)
         return texto
 
 async def buscar_imagem_jikan_async(session, nome):
@@ -278,7 +290,17 @@ async def buscar_imagem_jikan_async(session, nome):
             params={"q": nome, "limit": 3},
             timeout=aiohttp.ClientTimeout(total=15)
         ) as resposta:
-            resposta.raise_for_status()
+            content_type = resposta.headers.get("Content-Type", "")
+
+            if resposta.status != 200:
+                print(f"Erro Jikan HTTP {resposta.status} para {nome}")
+                return ""
+
+            if "application/json" not in content_type:
+                html = await resposta.text()
+                print("Jikan retornou algo que não é JSON:", html[:300])
+                return ""
+
             dados = (await resposta.json()).get("data", [])
 
             if not dados:
@@ -304,7 +326,8 @@ async def buscar_imagem_jikan_async(session, nome):
             cache_memoria[cache_key] = (agora, img)
             return img
 
-    except Exception:
+    except Exception as e:
+        print(f"Erro ao buscar imagem no Jikan para {nome}: {e}")
         return ""
 
 async def pegar_imagem_correta_async(session, media):
@@ -732,55 +755,60 @@ class SemanalAnimeNavigator(discord.ui.View):
 # AUTO NOTIFY
 # =========================
 async def montar_embed_autonotify(session, anime, dia_hoje):
-    prox = anime.get("nextAiringEpisode")
-    anime_id = anime.get("id")
+    try:
+        prox = anime.get("nextAiringEpisode")
+        anime_id = anime.get("id")
 
-    if not prox or not prox.get("airingAt") or not anime_id:
+        if not prox or not prox.get("airingAt") or not anime_id:
+            return None
+
+        titulo = melhor_titulo(anime)
+        imagem = await pegar_imagem_correta_async(session, anime)
+
+        sinopse = anime.get("description") or "Sem sinopse disponível."
+        sinopse = limpar_html(sinopse)
+        sinopse = await traduzir_texto_async(session, sinopse)
+        if len(sinopse) > 220:
+            sinopse = sinopse[:220] + "..."
+
+        embed = discord.Embed(
+            title=f"🔔 {titulo}",
+            url=anime.get("siteUrl", ""),
+            description=f"**Anime do calendário de {dia_hoje}**",
+            color=COR_EMBED
+        )
+
+        embed.add_field(
+            name="📺 Episódio",
+            value=str(prox.get("episode", "?")),
+            inline=True
+        )
+        embed.add_field(
+            name="🎞️ Formato",
+            value=formato_pt(anime.get("format")),
+            inline=True
+        )
+        embed.add_field(
+            name="⏰ Horário",
+            value=formatar_timestamp_local(prox.get("airingAt")),
+            inline=True
+        )
+
+        embed.add_field(
+            name="📖 Sinopse",
+            value=sinopse,
+            inline=False
+        )
+
+        if imagem:
+            embed.set_thumbnail(url=imagem)
+
+        embed.set_footer(text="Notificação automática do calendário")
+        return anime_id, embed
+
+    except Exception as e:
+        print(f"Erro ao montar embed de {melhor_titulo(anime)}: {e}")
         return None
-
-    titulo = melhor_titulo(anime)
-    imagem = await pegar_imagem_correta_async(session, anime)
-
-    sinopse = anime.get("description") or "Sem sinopse disponível."
-    sinopse = limpar_html(sinopse)
-    sinopse = await traduzir_texto_async(session, sinopse)
-    if len(sinopse) > 220:
-        sinopse = sinopse[:220] + "..."
-
-    embed = discord.Embed(
-        title=f"🔔 {titulo}",
-        url=anime.get("siteUrl", ""),
-        description=f"**Anime do calendário de {dia_hoje}**",
-        color=COR_EMBED
-    )
-
-    embed.add_field(
-        name="📺 Episódio",
-        value=str(prox.get("episode", "?")),
-        inline=True
-    )
-    embed.add_field(
-        name="🎞️ Formato",
-        value=formato_pt(anime.get("format")),
-        inline=True
-    )
-    embed.add_field(
-        name="⏰ Horário",
-        value=formatar_timestamp_local(prox.get("airingAt")),
-        inline=True
-    )
-
-    embed.add_field(
-        name="📖 Sinopse",
-        value=sinopse,
-        inline=False
-    )
-
-    if imagem:
-        embed.set_thumbnail(url=imagem)
-
-    embed.set_footer(text="Notificação automática do calendário")
-    return anime_id, embed
 
 async def coletar_embeds_autonotify(animes, dia_hoje, ignorar_ids=None):
     ignorar_ids = set(ignorar_ids or [])
@@ -807,7 +835,7 @@ async def coletar_embeds_autonotify(animes, dia_hoje, ignorar_ids=None):
     if not lista_hoje:
         return []
 
-    connector = aiohttp.TCPConnector(limit=20)
+    connector = aiohttp.TCPConnector(limit=5)
     async with aiohttp.ClientSession(connector=connector) as session:
         tarefas = [
             montar_embed_autonotify(session, anime, dia_hoje)
@@ -993,6 +1021,7 @@ async def autonotify(interaction: discord.Interaction, acao: app_commands.Choice
             "♻️ Reset feito com sucesso. Agora pode ligar de novo e reenviar os animes de hoje.",
             ephemeral=True
         )
+
 # =========================
 # LOOP AUTOMÁTICO
 # =========================
@@ -1063,7 +1092,7 @@ async def setup_hook():
 
     except Exception as e:
         print(f"Erro no setup_hook ao sincronizar comandos: {e}")
-        
+
 @client.event
 async def on_ready():
     if not verificar_notificacoes.is_running():
