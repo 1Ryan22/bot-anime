@@ -198,7 +198,15 @@ def em_cooldown(user_id, comando):
 def carregar_auto():
     if os.path.exists(ARQUIVO_AUTO):
         with open(ARQUIVO_AUTO, "r", encoding="utf-8") as f:
-            return json.load(f)
+            dados = json.load(f)
+
+        if "canais" not in dados:
+            dados["canais"] = []
+        if "avisados" not in dados:
+            dados["avisados"] = {}
+
+        return dados
+
     return {"canais": [], "avisados": {}}
 
 def salvar_auto(dados):
@@ -953,26 +961,38 @@ async def autonotify(interaction: discord.Interaction, acao: app_commands.Choice
     canal_id = interaction.channel_id
     data_hoje = agora_local().strftime("%Y-%m-%d")
 
+    if data_hoje not in dados["avisados"]:
+        dados["avisados"][data_hoje] = []
+
     if acao.value == "ligar":
         if canal_id not in dados["canais"]:
             dados["canais"].append(canal_id)
+
+        dados["avisados"][data_hoje] = []
         salvar_auto(dados)
-        await interaction.response.send_message("✅ Notificação automática ligada neste canal.")
+
+        await interaction.response.send_message(
+            "✅ Notificação automática ligada neste canal.\n"
+            "♻️ Os avisos de hoje foram resetados, então os animes do dia podem ser enviados de novo."
+        )
 
     elif acao.value == "desligar":
         if canal_id in dados["canais"]:
             dados["canais"].remove(canal_id)
         salvar_auto(dados)
-        await interaction.response.send_message("🛑 Notificação automática desligada neste canal.")
+
+        await interaction.response.send_message(
+            "🛑 Notificação automática desligada neste canal."
+        )
 
     elif acao.value == "resetar":
         dados["avisados"][data_hoje] = []
         salvar_auto(dados)
+
         await interaction.response.send_message(
-            "♻️ Notificações de hoje resetadas! O bot pode enviar tudo novamente.",
+            "♻️ Reset feito com sucesso. Agora pode ligar de novo e reenviar os animes de hoje.",
             ephemeral=True
         )
-
 # =========================
 # LOOP AUTOMÁTICO
 # =========================
@@ -1002,49 +1022,53 @@ async def verificar_notificacoes():
         if not resultados:
             return
 
+        houve_envio = False
+
         for anime_id, embed in resultados:
+            enviado_ao_menos_uma_vez = False
+
             for canal_id in dados["canais"]:
                 canal = client.get_channel(canal_id)
                 if canal:
                     try:
                         await canal.send(embed=embed)
+                        enviado_ao_menos_uma_vez = True
                     except Exception as e:
                         print(f"Erro ao enviar no canal {canal_id}: {e}")
 
-            if anime_id not in dados["avisados"][data_hoje]:
+            if enviado_ao_menos_uma_vez and anime_id not in dados["avisados"][data_hoje]:
                 dados["avisados"][data_hoje].append(anime_id)
+                houve_envio = True
 
-        salvar_auto(dados)
+        if houve_envio:
+            salvar_auto(dados)
 
     except Exception as e:
         print("Erro na notificação automática:", e)
 
 # =========================
-# START
+# EVENTOS
 # =========================
 @client.event
-async def on_ready():
+async def setup_hook():
     try:
         guild = discord.Object(id=GUILD_ID)
-
-        # limpeza temporária de comandos antigos bugados
         tree.clear_commands(guild=guild)
         await tree.sync(guild=guild)
-
-        synced = await tree.sync(guild=guild)
-
-        print(f"Sincronizados {len(synced)} comandos na guild {GUILD_ID}")
-        print("Comandos sincronizados:")
-        for cmd in synced:
-            print(f"- {cmd.name}")
+        print(f"Comandos sincronizados na guild {GUILD_ID}")
     except Exception as e:
-        print(f"Erro ao sincronizar comandos: {e}")
+        print(f"Erro no setup_hook ao sincronizar comandos: {e}")
 
+@client.event
+async def on_ready():
     if not verificar_notificacoes.is_running():
         verificar_notificacoes.start()
 
     print(f"Bot conectado como {client.user}")
 
+# =========================
+# START
+# =========================
 if __name__ == "__main__":
     keep_alive()
 
