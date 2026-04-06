@@ -1053,12 +1053,19 @@ async def verificar_notificacoes():
 async def setup_hook():
     try:
         guild = discord.Object(id=GUILD_ID)
+
+        # limpa comandos globais antigos
+        tree.clear_commands(guild=None)
+        await tree.sync()
+
+        # limpa e sincroniza comandos da guild
         tree.clear_commands(guild=guild)
         await tree.sync(guild=guild)
+
         print(f"Comandos sincronizados na guild {GUILD_ID}")
     except Exception as e:
         print(f"Erro no setup_hook ao sincronizar comandos: {e}")
-
+        
 @client.event
 async def on_ready():
     if not verificar_notificacoes.is_running():
