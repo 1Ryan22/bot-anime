@@ -1054,15 +1054,13 @@ async def setup_hook():
     try:
         guild = discord.Object(id=GUILD_ID)
 
-        # limpa comandos globais antigos
-        tree.clear_commands(guild=None)
-        await tree.sync()
+        tree.copy_global_to(guild=guild)
+        synced = await tree.sync(guild=guild)
 
-        # limpa e sincroniza comandos da guild
-        tree.clear_commands(guild=guild)
-        await tree.sync(guild=guild)
+        print(f"Comandos sincronizados na guild {GUILD_ID}: {len(synced)}")
+        for cmd in synced:
+            print(f"- {cmd.name}")
 
-        print(f"Comandos sincronizados na guild {GUILD_ID}")
     except Exception as e:
         print(f"Erro no setup_hook ao sincronizar comandos: {e}")
         
